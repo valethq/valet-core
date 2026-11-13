@@ -34,9 +34,30 @@ export interface CoreBusOptions {
   maxDepth?: number;
 }
 
+/** EmitResult plus the value produced by a mid-emit commit (core action events, 7.3). */
+export interface ActionResult<P, T> extends EmitResult<P> {
+  /** Present when `commit` ran; undefined when the action was cancelled. */
+  readonly value: T | undefined;
+}
+
 export interface CoreBus {
   /** Core-internal emit with a full caller. Not reachable from PluginContext. */
-  emitAs<N extends EvName>(caller: Caller, name: N, payload: ValetEvents[N]): Promise<EmitResult<ValetEvents[N]>>;
+  emitAs<N extends EvName>(
+    caller: Caller,
+    name: N,
+    payload: ValetEvents[N],
+  ): Promise<EmitResult<ValetEvents[N]>>;
+  /**
+   * Action event (7.3): `before` hooks run, then `commit(finalPayload)` performs the
+   * write inside its transaction, then `after` hooks. Skipped when cancelled; a
+   * throw from `commit` rejects the emit and skips the after phase.
+   */
+  emitActionAs<N extends EvName, T>(
+    caller: Caller,
+    name: N,
+    payload: ValetEvents[N],
+    commit: (payload: ValetEvents[N]) => T,
+  ): Promise<ActionResult<ValetEvents[N], T>>;
   signalAs<N extends SigName>(caller: Caller, name: N, payload: ValetSignals[N]): void;
   /** The PluginEventBus for one plugin, bound to its id and its event namespace (default: id minus "valet-"). */
   forPlugin(pluginId: string, namespace?: string): ScopedPluginEventBus;

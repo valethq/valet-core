@@ -36,5 +36,9 @@ export interface ToolResult {
 
 export interface ToolProvider {
   /** Re-read on each run, so tools can depend on session or project. */
-  list(scope: { sessionId: string; projectId: string; role: Role }): ToolDefinition[] | Promise<ToolDefinition[]>;
+  list(scope: {
+    sessionId: string;
+    projectId: string;
+    role: Role;
+  }): ToolDefinition[] | Promise<ToolDefinition[]>;
 }

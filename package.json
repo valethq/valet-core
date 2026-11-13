@@ -1,7 +1,10 @@
 {
   "name": "valet-core",
   "private": true,
-  "workspaces": ["packages/*", "plugins/*"],
+  "workspaces": [
+    "packages/*",
+    "plugins/*"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "lint": "biome check .",

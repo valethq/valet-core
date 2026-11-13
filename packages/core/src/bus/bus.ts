@@ -16,7 +16,7 @@ import {
   type ValetSignals,
 } from "@valethq/sdk";
 import { deepFreeze } from "./freeze";
-import type { CoreBus, CoreBusOptions, HookErrorReport, ScopedPluginEventBus } from "./types";
+import type { ActionResult, CoreBus, CoreBusOptions, HookErrorReport, ScopedPluginEventBus } from "./types";
 
 type EvName = Extract<keyof ValetEvents, string>;
 type SigName = Extract<keyof ValetSignals, string>;
@@ -59,7 +59,10 @@ interface HookScope {
 class CoreBusImpl implements CoreBus {
   readonly #hooks = new Map<string, HookRecord[]>();
   readonly #signals = new Map<string, SignalRecord[]>();
-  readonly #restrict = new Map<string, { owner: string; fn: (subscriber: string, name: string) => boolean }>();
+  readonly #restrict = new Map<
+    string,
+    { owner: string; fn: (subscriber: string, name: string) => boolean }
+  >();
   readonly #scope = new AsyncLocalStorage<HookScope>();
   readonly #logger: Logger;
   readonly #dev: boolean;
@@ -86,6 +89,17 @@ class CoreBusImpl implements CoreBus {
     payload: ValetEvents[N],
   ): Promise<EmitResult<ValetEvents[N]>> {
     return this.#emit(caller, name, payload) as Promise<EmitResult<ValetEvents[N]>>;
+  }
+
+  emitActionAs<N extends EvName, T>(
+    caller: Caller,
+    name: N,
+    payload: ValetEvents[N],
+    commit: (payload: ValetEvents[N]) => T,
+  ): Promise<ActionResult<ValetEvents[N], T>> {
+    return this.#emit(caller, name, payload, commit as (payload: unknown) => unknown) as Promise<
+      ActionResult<ValetEvents[N], T>
+    >;
   }
 
   signalAs<N extends SigName>(caller: Caller, name: N, payload: ValetSignals[N]): void {
@@ -129,7 +143,11 @@ class CoreBusImpl implements CoreBus {
     return this.#subscription(this.#signals, name, record.id);
   }
 
-  addRestrict(owner: string, namespace: string, fn: (subscriber: string, name: string) => boolean): Disposable {
+  addRestrict(
+    owner: string,
+    namespace: string,
+    fn: (subscriber: string, name: string) => boolean,
+  ): Disposable {
     const existing = this.#restrict.get(namespace);
     if (existing && existing.owner !== owner) {
       throw new Error(`event namespace "${namespace}" is already restricted by "${existing.owner}"`);
@@ -154,7 +172,12 @@ class CoreBusImpl implements CoreBus {
 
   // ---- emit -------------------------------------------------------------
 
-  async #emit(caller: Caller, name: string, initialPayload: unknown): Promise<EmitResult<unknown>> {
+  async #emit(
+    caller: Caller,
+    name: string,
+    initialPayload: unknown,
+    commit?: (payload: unknown) => unknown,
+  ): Promise<EmitResult<unknown> & { value?: unknown }> {
     const parent = this.#scope.getStore();
     const depth = (parent?.depth ?? 0) + 1;
     if (depth > this.#maxDepth) {
@@ -219,6 +242,10 @@ class CoreBusImpl implements CoreBus {
       if (cancelled) break;
     }
 
+    // 7.3: the action's write happens between the phases, on the final payload.
+    let value: unknown;
+    if (!cancelled && commit) value = commit(payload);
+
     for (const record of after) {
       if (!this.#isRegistered(this.#hooks, name, record.id)) continue;
       if (record.once) this.#remove(this.#hooks, name, record.id);
@@ -244,6 +271,7 @@ class CoreBusImpl implements CoreBus {
       cancelled,
       ...(cancelReason === undefined ? {} : { cancelReason }),
       ...(denied === undefined ? {} : { denied }),
+      ...(commit === undefined ? {} : { value }),
     };
   }
 
@@ -293,7 +321,7 @@ class CoreBusImpl implements CoreBus {
   // 7.2 change 5: slow-hook warning plus a time limit; on timeout the hook keeps
   // running detached but its result is dropped.
   async #runHook(record: HookRecord, context: AnyEvent, depth: number): Promise<void> {
-    const limit = this.#limits[context.name] ?? HOOK_LIMIT_MS;
+    const limit = this.#limits[context.name] ?? this.#limits["*"] ?? HOOK_LIMIT_MS;
     const started = performance.now();
     const work = this.#scope.run({ depth, event: context.name, plugin: record.plugin }, () =>
       Promise.resolve().then(() => record.hook(context)),
@@ -309,7 +337,12 @@ class CoreBusImpl implements CoreBus {
       ]);
     } catch (cause) {
       if (cause instanceof EventHookError) throw cause;
-      throw new EventHookError(context.name, context.phase, record.plugin, cause === TIMEOUT ? "timeout" : cause);
+      throw new EventHookError(
+        context.name,
+        context.phase,
+        record.plugin,
+        cause === TIMEOUT ? "timeout" : cause,
+      );
     } finally {
       clearTimeout(timer);
       const ms = Math.round(performance.now() - started);
@@ -417,7 +450,9 @@ class PluginBusView implements ScopedPluginEventBus {
   /** Plugins may emit `<namespace>.*` and the shared `tool.call` action (7.2). */
   #assertEmitAllowed(name: string): void {
     if (name !== "tool.call" && !name.startsWith(`${this.namespace}.`)) {
-      throw new Error(`plugin "${this.pluginId}" cannot emit "${name}" outside its namespace "${this.namespace}"`);
+      throw new Error(
+        `plugin "${this.pluginId}" cannot emit "${name}" outside its namespace "${this.namespace}"`,
+      );
     }
   }
 }

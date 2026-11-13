@@ -97,8 +97,13 @@ export interface Store {
   projects: {
     get(id: string): Project | undefined;
     list(): Project[];
-    create(p: Pick<Project, "name" | "workspaceDir"> & { settings?: Project["settings"] }): Promise<Project | CancelledResult>;
-    update(id: string, patch: Partial<Pick<Project, "name" | "settings">>): Promise<Project | CancelledResult>;
+    create(
+      p: Pick<Project, "name" | "workspaceDir"> & { settings?: Project["settings"] },
+    ): Promise<Project | CancelledResult>;
+    update(
+      id: string,
+      patch: Partial<Pick<Project, "name" | "settings">>,
+    ): Promise<Project | CancelledResult>;
   };
   sessions: {
     get(id: string): Session | undefined;
@@ -118,7 +123,10 @@ export interface Store {
     findByBinding(platform: string, conversationId: string): Session | undefined;
   };
   messages: {
-    list(sessionId: string, q?: { beforeSeq?: number; limit?: number }): { message: Message; parts: Part[] }[];
+    list(
+      sessionId: string,
+      q?: { beforeSeq?: number; limit?: number },
+    ): { message: Message; parts: Part[] }[];
     create(m: {
       sessionId: string;
       role: Message["role"];
@@ -137,7 +145,9 @@ export interface Store {
     create(r: { sessionId: string; triggerMessageId?: string; role: Role }): Run;
     update(
       id: string,
-      patch: Partial<Pick<Run, "status" | "provider" | "model" | "error">> & { usage?: Record<string, number> },
+      patch: Partial<Pick<Run, "status" | "provider" | "model" | "error">> & {
+        usage?: Record<string, number>;
+      },
     ): void;
     cancel(id: string, by: string): Promise<void>; // emits run.cancel
   };
