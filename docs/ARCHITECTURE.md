@@ -777,7 +777,7 @@ export type PartData =
       output?: string; result?: ToolResult; status: "pending" | "running" | "done" | "error" | "cancelled" | "denied" }
   | { type: "file"; blobId: string; name: string; mime: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }   // "turn interrupted by restart", "exec job 12 finished"
-  | { type: "compaction"; by: string; coversThroughSeq: number; summary?: string };  // by "valet" carries a summary; a harness label is a marker only
+  | { type: "compaction"; by: string; status: "in_progress" | "completed" | "failed" | "cancelled"; coversThroughSeq: number; summary?: string; error?: string };  // by "valet" or a harness label; only a completed valet compaction with a summary changes valet's history
 ```
 
 A tool call and its result are one part that updates in place. That's what the "tool stepping" UI renders, and it also keeps the call and its result together when the context is rebuilt. `ModelMessage`s are derived from parts by ContextManager and are never stored.
@@ -907,7 +907,7 @@ Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring
 - **Persona file set, from project settings.** The default matches OpenClaw: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md` and today's plus yesterday's `memory/YYYY-MM-DD.md`. Files load in that order, under headed sections. A per-file byte cap warns rather than truncates silently.
 - **Role-aware loading.** Files can set `minRole`. The default is that `MEMORY.md` and the daily memory files load only for `owner` runs (decision 5).
 - **History** (`model` providers): the latest `compaction` part that carries a `summary`, plus every message after `coversThroughSeq`, trimmed from the oldest if over budget. Budget = model context window − reserve for output.
-- **Compaction:** auto at 80% of the window (configurable), or manual with `/compact`. It uses the session's own model unless `settings.context.compactionModel` names another. For `agent` providers that compact themselves, valet never compacts: the harness's `compaction` event becomes a `compaction` marker part ("Compacted (by Claude Code)") in the same chat, with no new session. Valet only reseeds when it changes models or the remote session is lost.
+- **Compaction:** auto at 80% of the window (configurable), or manual with `/compact`. It uses the session's own model unless `settings.context.compactionModel` names another. For `agent` providers that compact themselves, valet never compacts: the harness's `compaction-start` and `compaction-end` events open and close a `compaction` part in the same chat ("Compacting (by Claude Code)…", then "Compacted (by Claude Code)"), with no new session. `/compact` asks the harness to compact through `AgentSession.compact` and follows the same events. Valet only reseeds when it changes models or the remote session is lost.
 - **"Read our last session":** a `session_search` tool over FTS, plus `session_read(sessionId, range)`.
 
 ### 11.3 `valet-devin`

@@ -76,6 +76,11 @@ export interface AgentSession {
     signal: AbortSignal,
   ): AsyncIterable<AgentEvent>;
   setModel?(model: string): Promise<void>;
+  /**
+   * Asks the harness to compact now (Claude Code `/compact`, Devin `/compact`). Yields the same
+   * compaction-start/end events as an automatic compaction, then finish.
+   */
+  compact?(instructions: string | undefined, signal: AbortSignal): AsyncIterable<AgentEvent>;
   close(): Promise<void>;
 }
 
@@ -94,6 +99,8 @@ export type AgentEvent =
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
   | { type: "notice"; level: "info" | "warning" | "error"; text: string }
-  /** The harness compacted its own context; valet records a marker and does not compact. */
-  | { type: "compaction" }
+  /** The harness started compacting its own context; valet opens a compaction part and never compacts it. */
+  | { type: "compaction-start" }
+  /** The harness finished compacting; closes the open compaction part. */
+  | { type: "compaction-end"; status: "completed" | "failed" | "cancelled"; error?: string }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };

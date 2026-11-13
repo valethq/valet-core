@@ -85,8 +85,15 @@ export type PartData =
     }
   | { type: "file"; blobId: string; name: string; mime: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string } // "turn interrupted by restart", "exec job 12 finished"
-  // by: "valet" (summary set; valet's history starts from it) or a harness label (marker only; the harness kept its own summary)
-  | { type: "compaction"; by: string; coversThroughSeq: number; summary?: string };
+  // by: "valet" or a harness label. Only a completed valet compaction with a summary changes valet's history.
+  | {
+      type: "compaction";
+      by: string;
+      status: "in_progress" | "completed" | "failed" | "cancelled";
+      coversThroughSeq: number;
+      summary?: string;
+      error?: string;
+    };
 
 export type CancelledResult = { cancelled: true; cancelReason?: string; denied?: Denial };
 export interface ActorRef {
