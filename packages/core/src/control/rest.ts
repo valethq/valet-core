@@ -30,8 +30,16 @@ export function deniedJson(
   denial: { by?: string; reason: string } | undefined,
   cancelReason?: string,
 ): Response {
-  if (denial) return errorJson(403, "denied", denial.reason, { by: denial.by });
-  return errorJson(403, "denied", cancelReason ?? "request denied");
+  return json(
+    {
+      error: {
+        code: "denied",
+        ...(denial?.by === undefined ? {} : { by: denial.by }),
+        reason: denial?.reason ?? cancelReason ?? "request denied",
+      },
+    },
+    403,
+  );
 }
 
 function isCancelled(value: unknown): value is CancelledResult {
