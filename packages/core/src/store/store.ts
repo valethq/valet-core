@@ -521,6 +521,7 @@ export class StoreView implements Store {
         startedAt: null,
         endedAt: null,
         error: null,
+        usage: {},
       };
       this.#deps.db.transaction(() => {
         this.#deps.db
@@ -560,6 +561,7 @@ export class StoreView implements Store {
       if (patch.provider !== undefined) run.provider = patch.provider;
       if (patch.model !== undefined) run.model = patch.model;
       if (patch.error !== undefined) run.error = patch.error;
+      if (patch.usage !== undefined) run.usage = { ...current.usage, ...patch.usage };
       if (run.status === "running" && run.startedAt === null) run.startedAt = now;
       if (TERMINAL_RUN.has(run.status) && run.endedAt === null) run.endedAt = now;
       this.#writeRun(run, patch.usage);

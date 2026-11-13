@@ -44,6 +44,7 @@ export function rowToRun(r: Row): Run {
     startedAt: (r.started_at as number | null) ?? null,
     endedAt: (r.ended_at as number | null) ?? null,
     error: (r.error as string | null) ?? null,
+    usage: json(r.usage) as Record<string, number>,
   };
 }
 

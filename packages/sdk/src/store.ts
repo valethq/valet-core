@@ -39,6 +39,7 @@ export interface Run {
   startedAt: number | null;
   endedAt: number | null;
   error: string | null;
+  usage: Record<string, number>;
 }
 export interface Message {
   id: string;
