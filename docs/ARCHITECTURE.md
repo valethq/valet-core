@@ -359,11 +359,19 @@ export type AgentEvent =
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-start"; callId: string; name: string; title?: string; input?: unknown }
   | { type: "tool-update"; callId: string; outputDelta?: string; status?: "running" | "done" | "error" }
-  | { type: "tool-end"; callId: string; status: "done" | "error" | "cancelled"; output?: string }
+  | {
+      type: "tool-end";
+      callId: string;
+      status: "done" | "error" | "cancelled";
+      output?: string;
+      exitCode?: number;
+    }
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };
 ```
+
+Providers set `exitCode` on `tool-end` when the tool reports one; `valet-agent` stores it as the tool part's `result.meta.exitCode`.
 
 **Fallbacks** are data, not provider logic. `session.settings.model` is `{ provider, model, fallbacks: [{ provider, model }...] }`. On `finish: error`, or a refusal, before any output has streamed, `valet-agent` retries with the next fallback. For Devin, `valet-devin` also passes `--refusal-fallback`.
 
