@@ -324,6 +324,25 @@ describe("runs", () => {
     expect(view.runs.get(run.id)?.endedAt).not.toBeNull();
   });
 
+  test("runs.update emits run.update with the updated run, as the caller", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const run = view.runs.create({ sessionId: session.id, role: "owner" });
+    const updates = watch("run.update");
+
+    view.runs.update(run.id, { usage: { contextTokens: 5 } });
+    await tick();
+    expect(updates.callers[0]?.plugin).toBe("valet-test");
+    expect(updates.payloads[0]?.run.id).toBe(run.id);
+    expect(updates.payloads[0]?.run.usage).toEqual({ contextTokens: 5 });
+
+    view.runs.update(run.id, { status: "complete", usage: { inputTokens: 1 } });
+    await tick();
+    expect(updates.payloads).toHaveLength(2);
+    expect(updates.payloads[1]?.run.status).toBe("complete");
+    expect(updates.payloads[1]?.run.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
+  });
+
   test("runs.cancel emits run.cancel and ends the run", async () => {
     const project = await makeProject();
     const session = await makeSession(project.id);

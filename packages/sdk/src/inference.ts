@@ -93,4 +93,5 @@ export type AgentEvent =
     }
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
+  | { type: "notice"; level: "info" | "warning" | "error"; text: string }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };
