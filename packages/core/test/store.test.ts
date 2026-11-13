@@ -243,9 +243,12 @@ describe("runs", () => {
 
     view.runs.update(run.id, { status: "running", provider: "devin-cli", model: "opus" });
     expect(view.runs.get(run.id)?.startedAt).not.toBeNull();
+    view.runs.update(run.id, { usage: { contextTokens: 5 } });
     view.runs.update(run.id, { status: "complete", usage: { inputTokens: 1 } });
     await tick();
     expect(ended.payloads[0]?.run.status).toBe("complete");
+    expect(ended.payloads[0]?.run.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
+    expect(view.runs.get(run.id)?.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
     expect(view.runs.get(run.id)?.endedAt).not.toBeNull();
   });
 
