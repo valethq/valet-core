@@ -1,0 +1,12 @@
+# valet-core agent rules (read first, follow exactly)
+
+- `docs/ARCHITECTURE.md` is the normative spec. TypeScript interfaces in it are copied verbatim (names, fields, doc comments) into `packages/sdk`. Do not invent alternative designs; if the spec is silent, choose the simplest thing and leave a one-line `// spec-gap:` comment.
+- Runtime: Bun 1.4.4 (`~/.npm-global/bin/bun`; add `export PATH=$HOME/.npm-global/bin:$HOME/.local/bin:$PATH`). Bun workspaces, ESM, TypeScript `strict: true`, `noUncheckedIndexedAccess: true`. Tests use `bun test`. No build step; `main` points at `.ts`.
+- Packages: `packages/sdk` = `@valethq/sdk` (types plus tiny helpers `definePlugin`, `defineScope`, `ServiceDeniedError`; zero runtime deps). `packages/core` = `@valethq/core` (kernel + `valet` CLI). Core may depend on the SDK; the SDK never imports core. Plugins import only `@valethq/sdk`.
+- NO PRIVATE APIs: there is no `ctx.internal`, no core-only hook, no bypass flag, no special-casing of any plugin id. Base plugins get exactly the `PluginContext` every plugin gets.
+- Caller identity: core stamps `Caller` on every emit, hook event, store write and scope call from the plugin's own `ctx`. A plugin can never set `caller.plugin`. Every before hook can `deny(reason)`; a deny cancels the action and is reported with `by` = the denying plugin id.
+- Control plane only: the HTTP/WS server serves JSON/MCP/webhooks to control valet. No static file serving, no HTML, no SPA, nothing claims `/` (it returns the JSON status doc). Plugin responses with `text/html` become 500. Every response gets `Content-Security-Policy: default-src 'none'`.
+- Dependencies: avoid them. Allowed: `typescript`, `@types/bun`, `@biomejs/biome` (dev). JSON-schema validation: write a small validator for the subset used (type/required/properties/items/enum/additionalProperties) rather than adding ajv. Semver: use `Bun.semver`.
+- Every change ships with tests. Before finishing, run and make pass: `bun run typecheck` (tsc --noEmit -p .), `bun run lint` (biome check .), `bun test`.
+- Do not `git commit`, push, or touch anything outside this repo. Do not edit `docs/` or `reference/`. Do not start long-running servers except inside tests (bind port 0).
+- Keep code comments minimal. Keep files small and named after what they hold.
