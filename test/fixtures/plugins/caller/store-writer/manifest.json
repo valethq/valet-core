@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx-store-writer",
+  "name": "w",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "fx-observer": "^0.1.0" }
+}

@@ -210,6 +210,23 @@ describe("messages", () => {
     expect(seen.payloads[0]?.message.status).toBe("complete");
     expect(view.messages.list(session.id)[0]?.message.status).toBe("complete");
   });
+
+  test("a before hook rewrite on message.complete reaches the write", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const created = await view.messages.create({
+      sessionId: session.id,
+      role: "assistant",
+      status: "streaming",
+      parts: [],
+    });
+    if (isCancelled(created)) throw new Error("cancelled");
+    bus.forPlugin("valet-rewriter").before("message.complete", (e) => {
+      e.payload = { message: { ...e.payload.message, status: "error" } };
+    });
+    await view.messages.complete(created.message.id, "complete");
+    expect(view.messages.list(session.id)[0]?.message.status).toBe("error");
+  });
 });
 
 describe("runs", () => {

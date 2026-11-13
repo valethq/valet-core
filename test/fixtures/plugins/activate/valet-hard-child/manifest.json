@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-hard-child",
+  "name": "hc",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "valet-thrower": "^0.1.0" }
+}

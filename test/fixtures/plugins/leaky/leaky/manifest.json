@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx-leaky",
+  "name": "l",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "provides": ["leakyscope@1"]
+}

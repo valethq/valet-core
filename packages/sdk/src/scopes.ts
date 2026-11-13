@@ -52,3 +52,14 @@ export class ServiceDeniedError extends Error {
     this.reason = reason;
   }
 }
+
+/** spec-gap: referenced by ScopeRegistry.get but never defined in the doc. */
+export class ScopeMissingError extends Error {
+  constructor(
+    readonly scope: string,
+    readonly key?: string,
+  ) {
+    super(`no provider for scope "${scope}"${key === undefined ? "" : ` with key "${key}"`}`);
+    this.name = "ScopeMissingError";
+  }
+}

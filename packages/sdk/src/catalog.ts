@@ -21,7 +21,13 @@ declare module "./events" {
     "run.interrupted": { run: Run };
     "tool.call": { runId: string; callId: string; name: string; input: unknown; role: Role };
     "principal.link": { principal: Principal; identity: { platform: string; externalId: string } };
-    "control.request": { kind: "http" | "ws.sub" | "ws.call"; method: string; path: string };
+    "control.request": {
+      kind: "http" | "ws.sub" | "ws.call";
+      method: string;
+      path: string;
+      /** The plugin that owns the matched route or topic prefix, when there is one. */
+      plugin?: string;
+    };
     "core.ready": Record<string, never>;
     "core.shutdown": Record<string, never>;
   }

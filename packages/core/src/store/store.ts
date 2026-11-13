@@ -101,10 +101,10 @@ export class StoreView implements Store {
     caller: Caller,
     name: N,
     payload: ValetEvents[N],
-    write: () => void,
+    write: (payload: ValetEvents[N]) => void,
   ): Promise<void> {
-    const res = await this.#deps.bus.emitActionAs(caller, name, payload, () => {
-      write();
+    const res = await this.#deps.bus.emitActionAs(caller, name, payload, (final) => {
+      write(final);
       return undefined;
     });
     if (res.cancelled && res.denied) throw denialError(res.denied);
@@ -328,14 +328,14 @@ export class StoreView implements Store {
     bind: async (id: string, binding: ChannelBinding): Promise<void> => {
       const session = this.#getSession(id);
       if (!session) throw new Error(`unknown session "${id}"`);
-      await this.#actionVoid(this.#caller, "session.update", { session, patch: {} }, () =>
+      await this.#actionVoid(this.#caller, "session.update", { session, patch: {} }, ({ session: final }) =>
         this.#deps.db.transaction(() => {
           this.#deps.db
             .query(
               `INSERT INTO session_bindings (session_id, platform, conversation_id, meta) VALUES (?, ?, ?, ?)
                ON CONFLICT (platform, conversation_id) DO UPDATE SET session_id = excluded.session_id, meta = excluded.meta`,
             )
-            .run(id, binding.platform, binding.conversationId, JSON.stringify(binding.meta ?? {}));
+            .run(final.id, binding.platform, binding.conversationId, JSON.stringify(binding.meta ?? {}));
         })(),
       );
     },
@@ -468,11 +468,11 @@ export class StoreView implements Store {
       const current = this.#getMessage(messageId);
       if (!current) throw new Error(`unknown message "${messageId}"`);
       const message: Message = { ...current, status, updatedAt: Date.now() };
-      await this.#actionVoid(this.#caller, "message.complete", { message }, () =>
+      await this.#actionVoid(this.#caller, "message.complete", { message }, ({ message: final }) =>
         this.#deps.db.transaction(() => {
           this.#deps.db
             .query("UPDATE messages SET status = ?, updated_at = ? WHERE id = ?")
-            .run(message.status, message.updatedAt, message.id);
+            .run(final.status, final.updatedAt, final.id);
         })(),
       );
     },
@@ -569,9 +569,11 @@ export class StoreView implements Store {
     cancel: async (id: string, by: string): Promise<void> => {
       const current = this.#getRun(id);
       if (!current) throw new Error(`unknown run "${id}"`);
-      const res = await this.#deps.bus.emitActionAs(this.#caller, "run.cancel", { runId: id, by }, () =>
+      const res = await this.#deps.bus.emitActionAs(this.#caller, "run.cancel", { runId: id, by }, (final) =>
         this.#deps.db.transaction(() => {
-          const run: Run = { ...current, status: "cancelled", endedAt: current.endedAt ?? Date.now() };
+          const target = this.#getRun(final.runId);
+          if (!target) throw new Error(`unknown run "${final.runId}"`);
+          const run: Run = { ...target, status: "cancelled", endedAt: target.endedAt ?? Date.now() };
           this.#writeRun(run);
           return run;
         })(),
@@ -658,11 +660,11 @@ export class StoreView implements Store {
         this.#caller,
         "principal.link",
         { principal, identity: { platform, externalId } },
-        () =>
+        ({ principal: p, identity }) =>
           this.#deps.db.transaction(() => {
             this.#deps.db
               .query("INSERT INTO identities (platform, external_id, principal_id) VALUES (?, ?, ?)")
-              .run(platform, externalId, principalId);
+              .run(identity.platform, identity.externalId, p.id);
           })(),
       );
     },

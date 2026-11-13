@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-soft-child",
+  "name": "sc",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "optionalDependencies": { "valet-thrower": "^0.1.0" }
+}
