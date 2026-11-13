@@ -837,6 +837,8 @@ The same pattern applies below the control plane. Every event, hook and scope ca
 
 All frames are JSON over `/ws`. The connection is identified the same way as HTTP (10.2), and `sub` and `call` frames go through `control.request` (kinds `ws.sub` and `ws.call`). So topic access is a deny hook too: `valet-auth` guards core topics, and `valet-exec` guards `exec:<jobId>`.
 
+Sockets are re-identified with their upgrade headers whenever any plugin emits `identity.changed` (payload `{ principalId? }`, debounced to 250 ms) and every 60 s. A socket that no longer identifies as the same principal is closed with code `4401` (`unauthenticated`). `POST /sessions/:id/messages` accepts an optional `clientMessageId` (string, at most 100 chars) stored in `message.meta.clientMessageId`. A repeat within the session's last 50 messages returns the existing message with 200 and creates nothing, so no second run starts.
+
 ```ts
 type ClientFrame =
   | { type: "sub"; topics: string[]; since?: Record<string, number> } // resume from per-topic seq

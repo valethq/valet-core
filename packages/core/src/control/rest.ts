@@ -182,9 +182,19 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (typeof b.role !== "string" || !Array.isArray(b.parts)) {
         return errorJson(400, "bad_request", "role and parts are required");
       }
+      const clientId = b.clientMessageId;
+      if (clientId !== undefined && (typeof clientId !== "string" || clientId.length > 100)) {
+        return errorJson(400, "bad_request", "clientMessageId must be a string of at most 100 chars");
+      }
+      if (clientId !== undefined) {
+        const recent = store.messages.list(ctx.params.id as string, { limit: 50 });
+        const dup = recent.find((m) => m.message.meta.clientMessageId === clientId);
+        if (dup) return json(dup);
+      }
       return result(
         await store.messages.create({
           sessionId: ctx.params.id as string,
+          ...(clientId === undefined ? {} : { meta: { clientMessageId: clientId } }),
           role: b.role as "user" | "assistant" | "system" | "tool",
           parts: b.parts as Parameters<Store["messages"]["create"]>[0]["parts"],
           ...(b.authorPrincipalId === undefined && ctx.caller.actor === undefined
