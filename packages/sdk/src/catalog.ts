@@ -44,6 +44,8 @@ declare module "./events" {
       /** Length of the part's text/output before this delta was appended; dedupe or refetch on overlap. */
       offset: number;
     };
+    /** A part was opened, replaced or closed; carries the whole part so a client can update it in place. */
+    "part.update": { sessionId: string; messageId: string; part: unknown };
     "run.status": { sessionId: string; runId: string; status: string };
     "core.config.changed": { changed: string[]; restartRequired: string[] };
     "core.hook.error": { eventName: string; phase: HookPhase; plugin: string | undefined; error: unknown };

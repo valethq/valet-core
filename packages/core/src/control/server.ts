@@ -94,6 +94,7 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
     hub.publish(`session:${e.payload.run.sessionId}`, "run.update", e.payload),
   );
   coreEvents.after("run.end", (e) => hub.publish(`session:${e.payload.run.sessionId}`, "run.end", e.payload));
+  coreEvents.onSignal("part.update", (p) => hub.publish(`session:${p.sessionId}`, "part.update", p));
   coreEvents.onSignal("run.status", (p) => hub.publish(`session:${p.sessionId}`, "run.status", p));
 
   let reidentifyTimer: ReturnType<typeof setTimeout> | undefined;

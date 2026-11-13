@@ -481,6 +481,11 @@ export class StoreView implements Store {
         updatedAt: now,
       };
       this.#insertPart(part);
+      this.#deps.bus.signalAs(this.#caller, "part.update", {
+        sessionId: row.session_id,
+        messageId,
+        part,
+      });
       return new DbPartWriter(this.#deps, this.#caller, part, row.session_id);
     },
 
@@ -791,6 +796,7 @@ class DbPartWriter implements PartWriter {
     this.#data = data;
     this.#deps.liveParts.set(this.partId, this.#data);
     this.#flush();
+    this.#publish("streaming");
   }
 
   close(status: "complete" | "error" | "interrupted", final?: PartData): void {
@@ -803,6 +809,22 @@ class DbPartWriter implements PartWriter {
       .query("UPDATE parts SET status = ?, data = ?, updated_at = ? WHERE id = ?")
       .run(status, JSON.stringify(this.#data), now, this.partId);
     this.#lastFlush = now;
+    this.#publish(status);
+  }
+
+  /** Whole-part update for clients that don't stream deltas (compaction markers). */
+  #publish(status: "streaming" | "complete" | "error" | "interrupted"): void {
+    this.#deps.bus.signalAs(this.#caller, "part.update", {
+      sessionId: this.#sessionId,
+      messageId: this.#messageId,
+      part: {
+        id: this.partId,
+        messageId: this.#messageId,
+        status,
+        type: this.#data.type,
+        data: this.#data,
+      },
+    });
   }
 
   #flush(now = Date.now()): void {
