@@ -245,6 +245,52 @@ describe("identity + core REST", () => {
   });
 });
 
+describe("session delete", () => {
+  test("DELETE removes the session, its messages and runs; children are orphaned; second delete 404s", async () => {
+    const env = await up({
+      fixtures: ["auth"],
+      plugins: {
+        "valet-fixture-auth": {
+          config: { token: "tok", externalId: "owner", displayName: "Owner", role: "owner" },
+        },
+      },
+    });
+    const project = await createProject(env.base);
+    const parent = await createSession(env.base, project.id);
+    const child = (await (
+      await post(
+        env.base,
+        "/api/core/sessions",
+        { projectId: project.id, parentSessionId: parent.id },
+        JSON_POST,
+      )
+    ).json()) as { id: string };
+    await post(env.base, `/api/core/sessions/${parent.id}/messages`, {
+      role: "user",
+      parts: [{ type: "text", text: "hi" }],
+    });
+    const run = env.kernel.store.forPlugin("valet-test").runs.create({ sessionId: parent.id, role: "owner" });
+
+    const del = await fetch(`${env.base}/api/core/sessions/${parent.id}`, {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(del.status).toBe(200);
+    expect(((await del.json()) as { id: string }).id).toBe(parent.id);
+    expect((await fetch(`${env.base}/api/core/sessions/${parent.id}`, { headers: AUTH })).status).toBe(404);
+    expect((await fetch(`${env.base}/api/core/runs/${run.id}`, { headers: AUTH })).status).toBe(404);
+    const orphan = (await (
+      await fetch(`${env.base}/api/core/sessions/${child.id}`, { headers: AUTH })
+    ).json()) as {
+      parentSessionId: string | null;
+    };
+    expect(orphan.parentSessionId).toBeNull();
+    expect(
+      (await fetch(`${env.base}/api/core/sessions/${parent.id}`, { method: "DELETE", headers: AUTH })).status,
+    ).toBe(404);
+  });
+});
+
 describe("plugin routes", () => {
   test(":param routes, public webhook anonymous, text/html -> 500, CSP", async () => {
     const env = await up({

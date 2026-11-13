@@ -316,6 +316,23 @@ export class StoreView implements Store {
       );
     },
 
+    delete: async (id: string): Promise<Session | CancelledResult> => {
+      const session = this.#getSession(id);
+      if (!session) throw new Error(`unknown session "${id}"`);
+      return this.#action(this.#caller, "session.delete", { session }, ({ session: final }) =>
+        this.#deps.db.transaction(() => {
+          // spec-gap: plugin-owned tables that reference sessions are not cleaned up here.
+          this.#deps.db
+            .query("UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?")
+            .run(final.id);
+          this.#deps.db.query("DELETE FROM messages WHERE session_id = ?").run(final.id);
+          this.#deps.db.query("DELETE FROM runs WHERE session_id = ?").run(final.id);
+          this.#deps.db.query("DELETE FROM sessions WHERE id = ?").run(final.id);
+          return final;
+        })(),
+      );
+    },
+
     // Explicitly no event: private bookkeeping for one provider (8.4).
     setProviderState: (id: string, provider: string, state: unknown): void => {
       const session = this.#getSession(id);

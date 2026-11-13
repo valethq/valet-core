@@ -119,6 +119,7 @@ export interface Store {
       id: string,
       patch: Partial<Pick<Session, "title" | "color" | "status" | "settings">>,
     ): Promise<Session | CancelledResult>;
+    delete(id: string): Promise<Session | CancelledResult>;
     setProviderState(id: string, provider: string, state: unknown): void; // no event: private bookkeeping for one provider
     bind(id: string, binding: ChannelBinding): Promise<void>;
     findByBinding(platform: string, conversationId: string): Session | undefined;

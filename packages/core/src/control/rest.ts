@@ -167,6 +167,10 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (b.settings !== undefined) patch.settings = b.settings as Session["settings"];
       return result(await store.sessions.update(ctx.params.id as string, patch));
     }),
+    r("DELETE", "/sessions/:id", async (_req, ctx, store) => {
+      if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
+      return result(await store.sessions.delete(ctx.params.id as string));
+    }),
     r("GET", "/sessions/:id/messages", async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const q = new URL(req.url).searchParams;
