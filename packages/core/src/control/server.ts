@@ -10,7 +10,7 @@ import {
 import type { RouteRecord } from "../hosts";
 import type { PluginStatus, ValetKernel } from "../kernel";
 import { VALET_VERSION } from "../version";
-import { dispatchRest, errorJson, json, type RestDeps } from "./rest";
+import { deniedJson, dispatchRest, errorJson, json, type RestDeps } from "./rest";
 import { matchSegments, splitPath } from "./router";
 import { WsHub, type WsSocketData } from "./ws";
 
@@ -156,8 +156,9 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
         if (error instanceof ServiceDeniedError) {
           return {
             ok: false,
-            res: errorJson(403, "denied", error.reason || error.message, {
+            res: deniedJson({
               by: error.by ?? provider.plugin,
+              reason: error.reason || error.message,
             }),
           };
         }
@@ -240,7 +241,7 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
       return finalize(errorJson(500, "internal", "control.request hook failed"), origin);
     }
     if (denied) {
-      return finalize(errorJson(403, "denied", denied.reason, { by: denied.by }), origin);
+      return finalize(deniedJson(denied), origin);
     }
 
     const ctx: RequestContext = {

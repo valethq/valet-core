@@ -96,7 +96,7 @@ async function main(): Promise<number> {
     case "doctor":
       return doctor(args);
     case "import-openclaw":
-      console.log("import-openclaw: not implemented in M0");
+      console.log("not implemented in M0");
       return 2;
     default:
       console.error("usage: valet <start|doctor|import-openclaw> [--home <dir>]");
