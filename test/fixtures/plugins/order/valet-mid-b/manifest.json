@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-mid-b",
+  "name": "valet-mid-b",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "valet-base": "^0.1.0" }
+}

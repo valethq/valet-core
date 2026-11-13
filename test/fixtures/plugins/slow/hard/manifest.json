@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx-sleep-hard",
+  "name": "h",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "fx-sleeper": "^0.1.0" }
+}
