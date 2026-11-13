@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-needs-noscope",
+  "name": "ns",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "requires": ["ghost-scope@1"]
+}

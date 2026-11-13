@@ -22,6 +22,8 @@ export function recordMigration(db: Database, id: string): void {
  * Core migrations: numbered files `NNN_name.ts` in `migrations/`, each exporting
  * `up(db)`. Applied in order, each in a transaction, tracked in schema_migrations.
  * Re-running applies only the pending ones.
+ * spec-gap: 8.1 says numbered SQL files in packages/core/migrations; .ts modules
+ * here so a migration can run arbitrary code, not only SQL.
  */
 export async function runCoreMigrations(
   db: Database,

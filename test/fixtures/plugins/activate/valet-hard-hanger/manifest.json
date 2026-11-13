@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-hard-hanger",
+  "name": "hh",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "valet-hanger": "^0.1.0" }
+}

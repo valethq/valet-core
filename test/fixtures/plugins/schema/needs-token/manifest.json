@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "fx-needs-token",
+  "name": "n",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "configSchema": {
+    "type": "object",
+    "required": ["token"],
+    "properties": { "token": { "type": "string" }, "n": { "type": "integer" } }
+  }
+}

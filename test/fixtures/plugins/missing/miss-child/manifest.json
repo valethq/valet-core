@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx-miss-child",
+  "name": "c",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "fx-miss-parent": "^0.1.0" }
+}
