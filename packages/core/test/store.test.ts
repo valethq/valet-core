@@ -195,6 +195,41 @@ describe("messages", () => {
     expect(() => writer.append("!")).toThrow();
   });
 
+  test("a compaction part opens in progress, is replaced in place, and closes; it takes no deltas", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const created = await view.messages.create({
+      sessionId: session.id,
+      role: "system",
+      parts: [],
+      status: "streaming",
+    });
+    if (isCancelled(created)) throw new Error("cancelled");
+    const writer = view.messages.openPart(created.message.id, {
+      type: "compaction",
+      by: "valet",
+      status: "in_progress",
+      coversThroughSeq: 0,
+    });
+    expect(() => writer.append("x")).toThrow("takes replace(), not deltas");
+    writer.close("complete", {
+      type: "compaction",
+      by: "valet",
+      status: "completed",
+      coversThroughSeq: 0,
+      summary: "s",
+    });
+    const row = view.messages.list(session.id)[0]?.parts[0];
+    expect(row?.status).toBe("complete");
+    expect(row?.data).toEqual({
+      type: "compaction",
+      by: "valet",
+      status: "completed",
+      coversThroughSeq: 0,
+      summary: "s",
+    });
+  });
+
   test("deltas carry the pre-append offset for text and tool-output parts", async () => {
     const project = await makeProject();
     const session = await makeSession(project.id);

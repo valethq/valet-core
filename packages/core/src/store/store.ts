@@ -740,7 +740,8 @@ class DbPartWriter implements PartWriter {
   readonly #caller: Caller;
   readonly #sessionId: string;
   readonly #messageId: string;
-  readonly #kind: "text" | "reasoning" | "tool-output";
+  /** null for parts that are replaced whole (compaction) and never receive deltas. */
+  readonly #kind: "text" | "reasoning" | "tool-output" | null;
   #data: PartData;
   #closed = false;
   #lastFlush = Date.now();
@@ -755,12 +756,15 @@ class DbPartWriter implements PartWriter {
     if (part.data.type === "text") this.#kind = "text";
     else if (part.data.type === "reasoning") this.#kind = "reasoning";
     else if (part.data.type === "tool-call") this.#kind = "tool-output";
+    else if (part.data.type === "compaction") this.#kind = null;
     else throw new Error(`part type "${part.data.type}" does not stream`);
     deps.liveParts.set(part.id, this.#data);
   }
 
   append(delta: string): void {
     if (this.#closed) throw new Error(`part "${this.partId}" is closed`);
+    const kind = this.#kind;
+    if (kind === null) throw new Error(`part type "${this.#data.type}" takes replace(), not deltas`);
     let offset = 0;
     if (this.#data.type === "text" || this.#data.type === "reasoning") {
       offset = this.#data.text.length;
@@ -774,7 +778,7 @@ class DbPartWriter implements PartWriter {
       sessionId: this.#sessionId,
       messageId: this.#messageId,
       partId: this.partId,
-      kind: this.#kind,
+      kind,
       delta,
       offset,
     });
