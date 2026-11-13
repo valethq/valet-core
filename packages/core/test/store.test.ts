@@ -195,6 +195,78 @@ describe("messages", () => {
     expect(() => writer.append("!")).toThrow();
   });
 
+  test("deltas carry the pre-append offset for text and tool-output parts", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const created = await view.messages.create({
+      sessionId: session.id,
+      role: "assistant",
+      status: "streaming",
+      parts: [],
+    });
+    if (isCancelled(created)) throw new Error("cancelled");
+
+    const deltas: { kind: string; delta: string; offset: number }[] = [];
+    bus.forPlugin("valet-ui").onSignal("message.delta", (p) => {
+      deltas.push({ kind: p.kind, delta: p.delta, offset: p.offset });
+    });
+    const text = view.messages.openPart(created.message.id, { type: "text", text: "" });
+    text.append("he");
+    text.append("llo");
+    text.append("!");
+    const tool = view.messages.openPart(created.message.id, {
+      type: "tool-call",
+      callId: "c1",
+      name: "exec",
+      input: {},
+      status: "running",
+    });
+    tool.append("out");
+    tool.append("put");
+    text.close("complete");
+    tool.close("complete");
+
+    expect(deltas).toEqual([
+      { kind: "text", delta: "he", offset: 0 },
+      { kind: "text", delta: "llo", offset: 2 },
+      { kind: "text", delta: "!", offset: 5 },
+      { kind: "tool-output", delta: "out", offset: 0 },
+      { kind: "tool-output", delta: "put", offset: 3 },
+    ]);
+  });
+
+  test("list returns an open writer's in-memory data before the checkpoint", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const created = await view.messages.create({
+      sessionId: session.id,
+      role: "assistant",
+      status: "streaming",
+      parts: [],
+    });
+    if (isCancelled(created)) throw new Error("cancelled");
+
+    const writer = view.messages.openPart(created.message.id, { type: "text", text: "" });
+    writer.append("unflushed");
+
+    // The row still holds the last checkpoint.
+    const row = store.db
+      .query<{ data: string }, string>("SELECT data FROM parts WHERE id = ?")
+      .get(writer.partId);
+    expect(JSON.parse(row?.data ?? "")).toEqual({ type: "text", text: "" });
+
+    // Reads overlay the writer's live data.
+    const part = view.messages.list(session.id)[0]?.parts[0];
+    expect(part?.id).toBe(writer.partId);
+    expect(part?.data).toEqual({ type: "text", text: "unflushed" });
+
+    writer.replace({ type: "text", text: "replaced" });
+    expect(view.messages.list(session.id)[0]?.parts[0]?.data).toEqual({ type: "text", text: "replaced" });
+
+    writer.close("complete");
+    expect(view.messages.list(session.id)[0]?.parts[0]?.data).toEqual({ type: "text", text: "replaced" });
+  });
+
   test("message.complete updates status through the action event", async () => {
     const project = await makeProject();
     const session = await makeSession(project.id);
@@ -250,6 +322,25 @@ describe("runs", () => {
     expect(ended.payloads[0]?.run.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
     expect(view.runs.get(run.id)?.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
     expect(view.runs.get(run.id)?.endedAt).not.toBeNull();
+  });
+
+  test("runs.update emits run.update with the updated run, as the caller", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const run = view.runs.create({ sessionId: session.id, role: "owner" });
+    const updates = watch("run.update");
+
+    view.runs.update(run.id, { usage: { contextTokens: 5 } });
+    await tick();
+    expect(updates.callers[0]?.plugin).toBe("valet-test");
+    expect(updates.payloads[0]?.run.id).toBe(run.id);
+    expect(updates.payloads[0]?.run.usage).toEqual({ contextTokens: 5 });
+
+    view.runs.update(run.id, { status: "complete", usage: { inputTokens: 1 } });
+    await tick();
+    expect(updates.payloads).toHaveLength(2);
+    expect(updates.payloads[1]?.run.status).toBe("complete");
+    expect(updates.payloads[1]?.run.usage).toEqual({ contextTokens: 5, inputTokens: 1 });
   });
 
   test("runs.cancel emits run.cancel and ends the run", async () => {

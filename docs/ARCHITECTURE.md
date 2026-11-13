@@ -359,11 +359,20 @@ export type AgentEvent =
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-start"; callId: string; name: string; title?: string; input?: unknown }
   | { type: "tool-update"; callId: string; outputDelta?: string; status?: "running" | "done" | "error" }
-  | { type: "tool-end"; callId: string; status: "done" | "error" | "cancelled"; output?: string }
+  | {
+      type: "tool-end";
+      callId: string;
+      status: "done" | "error" | "cancelled";
+      output?: string;
+      exitCode?: number;
+    }
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
+  | { type: "notice"; level: "info" | "warning" | "error"; text: string }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };
 ```
+
+Providers set `exitCode` on `tool-end` when the tool reports one; `valet-agent` stores it as the tool part's `result.meta.exitCode`. A `notice` event is out-of-band provider information (e.g. a context-compaction warning), rendered as a `notice` part rather than hidden inside reasoning text.
 
 **Fallbacks** are data, not provider logic. `session.settings.model` is `{ provider, model, fallbacks: [{ provider, model }...] }`. On `finish: error`, or a refusal, before any output has streamed, `valet-agent` retries with the next fallback. For Devin, `valet-devin` also passes `--refusal-fallback`.
 
@@ -557,7 +566,7 @@ The bus is in memory and ephemeral. Durable facts go through the store, and the 
 | `session.create` / `session.update` / `session.delete` | `{ session }`, `{ session, patch }` | UI list refresh |
 | `message.create` | `{ message, parts }` | before: slash commands (`/model`, `/compact`, `/new`), role policy. after: `valet-agent` queues a run for user messages. |
 | `message.complete` | `{ message }` (status changes to `complete`, `error` or `interrupted`) | after: platform delivery, title generation |
-| `run.start` / `run.end` | `{ run }` | |
+| `run.start` / `run.update` / `run.end` | `{ run }` | `run.update` is emitted after every `runs.update` write, including usage-only patches, so live counters (e.g. context tokens) reach subscribers before the run ends |
 | `run.cancel` | `{ runId, by }` | `valet-agent` aborts the run's controller |
 | `run.interrupted` | `{ run }`, emitted after `core.ready` for runs found `running` at boot | `valet-agent` resume policy |
 | `tool.call` | `{ runId, callId, name, input, role }` | before: deny or rewrite (friend-tier policy, "never `qm destroy`"). after: audit |
@@ -571,9 +580,11 @@ The bus is in memory and ephemeral. Durable facts go through the store, and the 
 
 | Signal | Payload |
 |---|---|
-| `message.delta` | `{ sessionId, messageId, partId, kind: "text" \| "reasoning" \| "tool-output", delta }` |
+| `message.delta` | `{ sessionId, messageId, partId, kind: "text" \| "reasoning" \| "tool-output", delta, offset }` |
 | `run.status` | `{ sessionId, runId, status: string }` (e.g. "thinking", "running exec") |
 | `core.hook.error` | `{ eventName, phase, plugin, error }` |
+
+`offset` is the part's text/output length before the delta was appended, so a client can dedupe overlapping deltas and refetch the part when an `offset` exceeds its local length. While a part's writer is open, `messages.list` (and therefore REST) returns the writer's in-memory `data` rather than the last 500 ms checkpoint, so a snapshot taken mid-stream is exact.
 
 Plugins add their own, e.g. `exec.output` and `exec.job.end`.
 

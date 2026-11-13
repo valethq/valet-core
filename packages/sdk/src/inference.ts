@@ -84,7 +84,14 @@ export type AgentEvent =
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-start"; callId: string; name: string; title?: string; input?: unknown }
   | { type: "tool-update"; callId: string; outputDelta?: string; status?: "running" | "done" | "error" }
-  | { type: "tool-end"; callId: string; status: "done" | "error" | "cancelled"; output?: string }
+  | {
+      type: "tool-end";
+      callId: string;
+      status: "done" | "error" | "cancelled";
+      output?: string;
+      exitCode?: number;
+    }
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
+  | { type: "notice"; level: "info" | "warning" | "error"; text: string }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };

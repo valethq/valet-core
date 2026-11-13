@@ -16,6 +16,7 @@ declare module "./events" {
     "message.create": { message: Message; parts: Part[] };
     "message.complete": { message: Message };
     "run.start": { run: Run };
+    "run.update": { run: Run };
     "run.end": { run: Run };
     "run.cancel": { runId: string; by: string };
     "run.interrupted": { run: Run };
@@ -40,6 +41,8 @@ declare module "./events" {
       partId: string;
       kind: "text" | "reasoning" | "tool-output";
       delta: string;
+      /** Length of the part's text/output before this delta was appended; dedupe or refetch on overlap. */
+      offset: number;
     };
     "run.status": { sessionId: string; runId: string; status: string };
     "core.hook.error": { eventName: string; phase: HookPhase; plugin: string | undefined; error: unknown };
