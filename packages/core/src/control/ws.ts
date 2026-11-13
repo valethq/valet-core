@@ -25,7 +25,8 @@ export interface WsSocketData {
 
 const send = (ws: ServerWebSocket<WsSocketData>, frame: ServerFrame): void => {
   try {
-    ws.send(JSON.stringify(frame));
+    // send() === 0 means the frame was dropped; close so the client resumes via `since` instead of missing it.
+    if (ws.send(JSON.stringify(frame)) === 0) ws.close(1011, "send dropped");
   } catch {
     // socket closing; subscriptions are removed on close
   }

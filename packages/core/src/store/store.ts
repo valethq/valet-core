@@ -35,6 +35,8 @@ export interface StoreDeps {
   bus: CoreBus;
   blobsDir: string;
   logger: Logger;
+  /** In-memory data of parts with an open writer; reads overlay it on the checkpointed row. */
+  liveParts: Map<string, PartData>;
 }
 
 function denialError(denial: Denial): ServiceDeniedError {
@@ -501,7 +503,11 @@ export class StoreView implements Store {
     const rows = this.#deps.db
       .query("SELECT * FROM parts WHERE message_id = ? ORDER BY idx")
       .all(messageId) as Record<string, unknown>[];
-    return rows.map(rowToPart);
+    return rows.map((row) => {
+      const part = rowToPart(row);
+      const live = this.#deps.liveParts.get(part.id);
+      return live === undefined ? part : { ...part, data: live };
+    });
   }
 
   // ---- runs ---------------------------------------------------------------
@@ -732,21 +738,27 @@ class DbPartWriter implements PartWriter {
     else if (part.data.type === "reasoning") this.#kind = "reasoning";
     else if (part.data.type === "tool-call") this.#kind = "tool-output";
     else throw new Error(`part type "${part.data.type}" does not stream`);
+    deps.liveParts.set(part.id, this.#data);
   }
 
   append(delta: string): void {
     if (this.#closed) throw new Error(`part "${this.partId}" is closed`);
+    let offset = 0;
     if (this.#data.type === "text" || this.#data.type === "reasoning") {
+      offset = this.#data.text.length;
       this.#data = { ...this.#data, text: this.#data.text + delta };
     } else if (this.#data.type === "tool-call") {
+      offset = (this.#data.output ?? "").length;
       this.#data = { ...this.#data, output: (this.#data.output ?? "") + delta };
     }
+    this.#deps.liveParts.set(this.partId, this.#data);
     this.#deps.bus.signalAs(this.#caller, "message.delta", {
       sessionId: this.#sessionId,
       messageId: this.#messageId,
       partId: this.partId,
       kind: this.#kind,
       delta,
+      offset,
     });
     const now = Date.now();
     if (now - this.#lastFlush >= PART_CHECKPOINT_MS) this.#flush(now);
@@ -755,6 +767,7 @@ class DbPartWriter implements PartWriter {
   replace(data: PartData): void {
     if (this.#closed) throw new Error(`part "${this.partId}" is closed`);
     this.#data = data;
+    this.#deps.liveParts.set(this.partId, this.#data);
     this.#flush();
   }
 
@@ -762,6 +775,7 @@ class DbPartWriter implements PartWriter {
     if (this.#closed) return;
     if (final !== undefined) this.#data = final;
     this.#closed = true;
+    this.#deps.liveParts.delete(this.partId);
     const now = Date.now();
     this.#deps.db
       .query("UPDATE parts SET status = ?, data = ?, updated_at = ? WHERE id = ?")
