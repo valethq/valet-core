@@ -463,7 +463,7 @@ export interface ContextManager {
   /** agent-kind: persona/memory preamble for a new or reseeded remote session. */
   preamble(req: { sessionId: string; role: Role }): Promise<string>;
   shouldCompact(req: { sessionId: string; model: ModelInfo; lastUsage: { inputTokens?: number; contextTokens?: number } }): Promise<boolean>;
-  /** Writes a compaction-summary part. Older messages stay stored but leave the prompt window. */
+  /** Writes a compaction part: a valet summary (`by: "valet"`), or a marker for a harness that compacted itself. Older messages stay stored but leave the prompt window. */
   compact(req: { sessionId: string; reason: "auto" | "manual" | "resume" }): Promise<{ summaryPartId: string }>;
 }
 ```
@@ -759,7 +759,7 @@ Project (workspace dir, persona, default model)
  └─ Session (title, color, model + fallbacks, bindings, provider_state)
      ├─ Run (one agent turn; queued → running → complete|cancelled|error|interrupted)
      └─ Message (seq, role, author, status, origin)
-         └─ Part[] (text | reasoning | tool-call | file | notice | compaction-summary)
+         └─ Part[] (text | reasoning | tool-call | file | notice | compaction)
 ```
 
 - **Personas are files in the project's workspace dir** (`AGENTS.md`, `SOUL.md`, and so on). Project settings choose which files load and in what order. There is no persona table, so the agent can edit its own persona with its fs tools, as Helper does today.
@@ -777,7 +777,7 @@ export type PartData =
       output?: string; result?: ToolResult; status: "pending" | "running" | "done" | "error" | "cancelled" | "denied" }
   | { type: "file"; blobId: string; name: string; mime: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }   // "turn interrupted by restart", "exec job 12 finished"
-  | { type: "compaction-summary"; text: string; coversThroughSeq: number };
+  | { type: "compaction"; by: string; coversThroughSeq: number; summary?: string };  // by "valet" carries a summary; a harness label is a marker only
 ```
 
 A tool call and its result are one part that updates in place. That's what the "tool stepping" UI renders, and it also keeps the call and its result together when the context is rebuilt. `ModelMessage`s are derived from parts by ContextManager and are never stored.
@@ -886,7 +886,7 @@ Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring
 | 2. Long-running exec that survives restarts | `valet-exec` | `tools@1`, plugin storage, signals, `run.interrupted` |
 | 3. Persona and memory files intact | `valet-contextmanager`, `valet-fs` (read/write/edit tools) | project workspace dir, `context@1` |
 | 4. Devin CLI with model picker and fallbacks | `valet-devin` | `inference@1` (agent kind), session `provider_state`, MCP route |
-| 5. Compaction and resume | `valet-contextmanager` (compaction), `valet-agent` (resume policy) | `compaction-summary` parts, `run.interrupted`, FTS |
+| 5. Compaction and resume | `valet-contextmanager` (compaction), `valet-agent` (resume policy) | `compaction` parts, `run.interrupted`, FTS |
 | 6. Discord with owner/friend tiers | `valet-discord` | `platform@1`, principals and identities, effective role, `tool.call` policy |
 | Skills (rank 8) | `valet-skills` | Lists `skills/*/SKILL.md` in the preamble, `skill_read` tool |
 | Nightly memory "dreaming", scheduled prompts (rank 9) | `valet-scheduler` (v1.1) | Creates messages in a target session, delivers through `platform@1` |
@@ -906,8 +906,8 @@ Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring
 - **Defines and provides `context@1`.**
 - **Persona file set, from project settings.** The default matches OpenClaw: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md` and today's plus yesterday's `memory/YYYY-MM-DD.md`. Files load in that order, under headed sections. A per-file byte cap warns rather than truncates silently.
 - **Role-aware loading.** Files can set `minRole`. The default is that `MEMORY.md` and the daily memory files load only for `owner` runs (decision 5).
-- **History** (`model` providers): the latest `compaction-summary` plus every message after `coversThroughSeq`, trimmed from the oldest if over budget. Budget = model context window − reserve for output.
-- **Compaction:** auto at 80% of the window (configurable), or manual with `/compact`. It uses the session's own model unless `settings.context.compactionModel` names another. For `agent` providers that compact themselves, valet only reseeds when it changes models or the remote session is lost.
+- **History** (`model` providers): the latest `compaction` part that carries a `summary`, plus every message after `coversThroughSeq`, trimmed from the oldest if over budget. Budget = model context window − reserve for output.
+- **Compaction:** auto at 80% of the window (configurable), or manual with `/compact`. It uses the session's own model unless `settings.context.compactionModel` names another. For `agent` providers that compact themselves, valet never compacts: the harness's `compaction` event becomes a `compaction` marker part ("Compacted (by Claude Code)") in the same chat, with no new session. Valet only reseeds when it changes models or the remote session is lost.
 - **"Read our last session":** a `session_search` tool over FTS, plus `session_read(sessionId, range)`.
 
 ### 11.3 `valet-devin`

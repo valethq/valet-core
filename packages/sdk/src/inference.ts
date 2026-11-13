@@ -94,4 +94,6 @@ export type AgentEvent =
   | { type: "permission"; request: { callId: string; title: string }; respond(allow: boolean): void }
   | { type: "usage"; contextTokens?: number; inputTokens?: number; outputTokens?: number }
   | { type: "notice"; level: "info" | "warning" | "error"; text: string }
+  /** The harness compacted its own context; valet records a marker and does not compact. */
+  | { type: "compaction" }
   | { type: "finish"; reason: "stop" | "cancelled" | "length" | "error"; error?: string };
