@@ -571,9 +571,11 @@ The bus is in memory and ephemeral. Durable facts go through the store, and the 
 
 | Signal | Payload |
 |---|---|
-| `message.delta` | `{ sessionId, messageId, partId, kind: "text" \| "reasoning" \| "tool-output", delta }` |
+| `message.delta` | `{ sessionId, messageId, partId, kind: "text" \| "reasoning" \| "tool-output", delta, offset }` |
 | `run.status` | `{ sessionId, runId, status: string }` (e.g. "thinking", "running exec") |
 | `core.hook.error` | `{ eventName, phase, plugin, error }` |
+
+`offset` is the part's text/output length before the delta was appended, so a client can dedupe overlapping deltas and refetch the part when an `offset` exceeds its local length. While a part's writer is open, `messages.list` (and therefore REST) returns the writer's in-memory `data` rather than the last 500 ms checkpoint, so a snapshot taken mid-stream is exact.
 
 Plugins add their own, e.g. `exec.output` and `exec.job.end`.
 

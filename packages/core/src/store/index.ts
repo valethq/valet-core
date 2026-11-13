@@ -34,6 +34,7 @@ export async function openStore(opts: OpenStoreOptions): Promise<OpenedStore> {
     bus: opts.bus,
     blobsDir: join(opts.valetHome, "blobs"),
     logger: opts.logger ?? console,
+    liveParts: new Map(),
   };
   return { ...createStore(deps), pluginStorage: (pluginId) => createPluginStorage(db, pluginId) };
 }
