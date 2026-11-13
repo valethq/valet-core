@@ -328,7 +328,10 @@ describe("plugin storage", () => {
 
 describe("blobs", () => {
   test("put writes bytes under <valetHome>/blobs and path resolves them", async () => {
-    const { id } = await view.blobs.put(new Uint8Array([1, 2, 3]), { mime: "application/octet-stream", name: "b" });
+    const { id } = await view.blobs.put(new Uint8Array([1, 2, 3]), {
+      mime: "application/octet-stream",
+      name: "b",
+    });
     expect(id).toStartWith("blb_");
     const path = view.blobs.path(id);
     expect(path).toContain("/blobs/");
@@ -362,8 +365,9 @@ describe("restart recovery", () => {
     expect(view.runs.get(done.id)?.status).toBe("complete");
     const rows = view.messages.list(session.id);
     expect(rows[0]?.message.status).toBe("interrupted");
-    expect(rows[0]?.parts[0]?.status).toBe("interrupted");
-    expect((rows[0]?.parts[0]?.data as { text: string }).text).toBe("partial");
+    const part = rows[0]?.parts[0];
+    expect(part?.status).toBe("interrupted");
+    expect(part?.data).toEqual({ type: "text", text: "partial" });
     expect(store.findInterruptedRuns()).toEqual([]);
   });
 });
