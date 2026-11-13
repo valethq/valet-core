@@ -90,6 +90,9 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
   coreEvents.after("run.start", (e) =>
     hub.publish(`session:${e.payload.run.sessionId}`, "run.start", e.payload),
   );
+  coreEvents.after("run.update", (e) =>
+    hub.publish(`session:${e.payload.run.sessionId}`, "run.update", e.payload),
+  );
   coreEvents.after("run.end", (e) => hub.publish(`session:${e.payload.run.sessionId}`, "run.end", e.payload));
   coreEvents.onSignal("run.status", (p) => hub.publish(`session:${p.sessionId}`, "run.status", p));
 

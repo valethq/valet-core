@@ -553,7 +553,7 @@ export class StoreView implements Store {
       return run;
     },
 
-    // spec-gap: synchronous signature; run.end is emitted post-write on a terminal status.
+    // spec-gap: synchronous signature; run.update (and run.end on a terminal status) is emitted post-write.
     update: (
       id: string,
       patch: Partial<Pick<Run, "status" | "provider" | "model" | "error">> & {
@@ -572,6 +572,7 @@ export class StoreView implements Store {
       if (run.status === "running" && run.startedAt === null) run.startedAt = now;
       if (TERMINAL_RUN.has(run.status) && run.endedAt === null) run.endedAt = now;
       this.#writeRun(run, patch.usage);
+      this.#emitAfterWrite("run.update", { run });
       if (TERMINAL_RUN.has(run.status)) this.#emitAfterWrite("run.end", { run });
     },
 

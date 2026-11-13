@@ -16,6 +16,7 @@ declare module "./events" {
     "message.create": { message: Message; parts: Part[] };
     "message.complete": { message: Message };
     "run.start": { run: Run };
+    "run.update": { run: Run };
     "run.end": { run: Run };
     "run.cancel": { runId: string; by: string };
     "run.interrupted": { run: Run };
