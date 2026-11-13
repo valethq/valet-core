@@ -37,6 +37,16 @@ async function start(args: string[]): Promise<number> {
         control.stop();
         void kernel.shutdown().then(resolve);
       };
+      process.on("SIGHUP", () => {
+        void kernel.reload().then((r) => {
+          if (r.ok)
+            kernel.log.info("config reloaded (SIGHUP)", {
+              changed: r.changed,
+              restartRequired: r.restartRequired,
+            });
+          else kernel.log.error("config reload rejected (SIGHUP)", { errors: r.errors });
+        });
+      });
       process.on("SIGINT", stop);
       process.on("SIGTERM", stop);
     });

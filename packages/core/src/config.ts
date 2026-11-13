@@ -41,6 +41,20 @@ function expandHome(path: string): string {
   return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
+/** Structural equality for config values (key order ignored). */
+export function sameConfig(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameConfig(v, b[i]))
+    );
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((k) => sameConfig(a[k], b[k]));
+  }
+  return a === b;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -49,19 +63,25 @@ function fail(path: string, what: string): never {
   throw new ConfigError(`${path}: ${what}`);
 }
 
-/** Reads <valetHome>/config.json over the defaults and validates the shape (12). Missing file = defaults. */
+/** Reads <valetHome>/config.toml (else config.json) over the defaults and validates the shape (12). Missing file = defaults. */
 export function loadConfig(valetHome: string): { configPath: string; config: ValetConfig } {
   const config = defaultConfig(valetHome);
-  const configPath = join(valetHome, "config.json");
-  if (!existsSync(configPath)) return { configPath, config };
+  const tomlPath = join(valetHome, "config.toml");
+  const jsonPath = join(valetHome, "config.json");
+  const isToml = existsSync(tomlPath);
+  const configPath = isToml || !existsSync(jsonPath) ? tomlPath : jsonPath;
+  if (!isToml && !existsSync(jsonPath)) return { configPath, config };
 
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(configPath, "utf8"));
+    const text = readFileSync(configPath, "utf8");
+    raw = isToml ? Bun.TOML.parse(text) : JSON.parse(text);
   } catch (error) {
-    throw new ConfigError(`${configPath}: cannot parse JSON: ${(error as Error).message}`);
+    throw new ConfigError(
+      `${configPath}: cannot parse ${isToml ? "TOML" : "JSON"}: ${(error as Error).message}`,
+    );
   }
-  if (!isRecord(raw)) fail(configPath, "expected a JSON object");
+  if (!isRecord(raw)) fail(configPath, "expected a table at the top level");
 
   if (raw.server !== undefined) {
     if (!isRecord(raw.server)) fail(configPath, '"server" must be an object');

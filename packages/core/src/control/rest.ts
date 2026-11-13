@@ -7,7 +7,7 @@ import {
   type Session,
   type Store,
 } from "@valethq/sdk";
-import type { PluginStatus } from "../kernel";
+import type { PluginStatus, ReloadResult } from "../kernel";
 import { matchSegments, splitPath } from "./router";
 
 export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -86,6 +86,7 @@ const num = (v: string | null): number | undefined => (v === null ? undefined : 
 
 export interface RestDeps {
   plugins(): PluginStatus[];
+  reload(): Promise<ReloadResult>;
   /** Raw db handle for blob metadata (the Store API exposes only put/path). */
   blobMeta(id: string): { sha256: string; mime: string | null; name: string | null } | undefined;
   blobPath(id: string): string;
@@ -249,6 +250,10 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     }),
 
     r("GET", "/plugins", async () => json(deps.plugins())),
+    r("POST", "/config/reload", async () => {
+      const result = await deps.reload();
+      return json(result, result.ok ? 200 : 400);
+    }),
 
     r("GET", "/blobs/:id", async (_req, ctx) => {
       const meta = deps.blobMeta(ctx.params.id as string);

@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import type { ValetPlugin } from "@valethq/sdk";
 import { createCoreBus } from "./bus";
 import type { CoreBus } from "./bus/types";
-import { type ValetConfig, defaultValetHome, loadConfig } from "./config";
+import { type ValetConfig, defaultValetHome, loadConfig, sameConfig } from "./config";
+import { validateJsonSchema } from "./jsonschema";
 import { type CtxDeps, type PluginRuntime, buildPluginContext } from "./ctx";
 import { type HttpRegistry, type WsRegistry, createHttpRegistry, createWsRegistry } from "./hosts";
 import { type PluginRecord, discoverPlugins, resolvePlugins, unmetAtActivation } from "./loader";
@@ -20,6 +21,18 @@ export interface PluginStatus {
   state: "active" | "failed" | "disabled";
   error?: string;
   order?: number;
+  /** Set when a reload changed this plugin's config in a way it can only apply after a restart. */
+  restartRequired?: string;
+}
+
+export interface ReloadResult {
+  ok: boolean;
+  /** Plugins whose config block changed and was applied live. */
+  changed: string[];
+  /** Changes that only take effect after a restart; "core" covers server host/port, pluginPaths, scopes and enabled flags. */
+  restartRequired: { plugin: string; reason: string }[];
+  /** Why the reload was rejected (nothing is applied when this is non-empty). */
+  errors: string[];
 }
 
 export interface BootOptions {
@@ -48,6 +61,8 @@ export interface ValetKernel {
   readonly log: CoreLogger;
   /** Each plugin's state, error and load order (5.2: GET /api/core/plugins). */
   plugins(): PluginStatus[];
+  /** spec-gap: re-reads the config file, validates it, and applies what can change live; rejects the whole reload on any error. */
+  reload(): Promise<ReloadResult>;
   shutdown(): Promise<void>;
 }
 
@@ -78,7 +93,8 @@ function errorMessage(error: unknown): string {
 export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
   const valetHome = opts.valetHome ?? defaultValetHome();
   mkdirSync(valetHome, { recursive: true });
-  const { configPath, config } = loadConfig(valetHome);
+  const { configPath, config: bootConfig } = loadConfig(valetHome);
+  let config = bootConfig;
   const log = createLogger({ valetHome, out: opts.out });
   const coreLog = log.forPlugin("core");
 
@@ -154,11 +170,93 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       await bus.emitAs({ plugin: "core" }, "run.interrupted", { run });
     }
 
+    const pendingRestart = new Map<string, string>();
+    const blockOf = (c: ValetConfig, id: string): Record<string, unknown> => c.plugins[id]?.config ?? {};
+
+    const doReload = async (): Promise<ReloadResult> => {
+      const rejected = (errors: string[]): ReloadResult => ({
+        ok: false,
+        changed: [],
+        restartRequired: [],
+        errors,
+      });
+      let next: ValetConfig;
+      try {
+        next = loadConfig(valetHome).config;
+      } catch (error) {
+        return rejected([errorMessage(error)]);
+      }
+      const errors = activated.flatMap(({ rec }) => {
+        const schema = rec.manifest?.configSchema;
+        if (schema === undefined) return [];
+        return validateJsonSchema(blockOf(next, rec.id), schema).map((e) => `plugin "${rec.id}": ${e}`);
+      });
+      if (errors.length > 0) return rejected(errors);
+
+      const old = config;
+      const restartRequired: ReloadResult["restartRequired"] = [];
+      const coreChanges = [
+        !sameConfig(old.server.host, next.server.host) || old.server.port !== next.server.port
+          ? "server host/port"
+          : "",
+        !sameConfig(old.pluginPaths, next.pluginPaths) ? "pluginPaths" : "",
+        !sameConfig(old.scopes, next.scopes) ? "scopes" : "",
+        ...Object.keys({ ...old.plugins, ...next.plugins })
+          .filter((id) => (old.plugins[id]?.enabled ?? true) !== (next.plugins[id]?.enabled ?? true))
+          .map((id) => `plugins.${id}.enabled`),
+      ].filter((c) => c !== "");
+      for (const reason of coreChanges) restartRequired.push({ plugin: "core", reason });
+
+      config = {
+        ...old,
+        server: { ...old.server, allowedOrigins: next.server.allowedOrigins },
+        plugins: next.plugins,
+      };
+
+      const changed: string[] = [];
+      for (const { rec, runtime } of activated) {
+        const prev = blockOf(old, rec.id);
+        const block = blockOf(next, rec.id);
+        if (sameConfig(prev, block)) continue;
+        try {
+          if (await runtime.applyConfig(block)) {
+            changed.push(rec.id);
+            pendingRestart.delete(rec.id);
+            coreLog.info(`plugin "${rec.id}" config reloaded`, { plugin: rec.id });
+          } else {
+            pendingRestart.set(rec.id, "plugin does not support live config changes");
+          }
+        } catch (error) {
+          pendingRestart.set(rec.id, errorMessage(error));
+        }
+        const reason = pendingRestart.get(rec.id);
+        if (reason !== undefined && !changed.includes(rec.id)) {
+          restartRequired.push({ plugin: rec.id, reason });
+          coreLog.warn(`plugin "${rec.id}" config change needs a restart: ${reason}`, { plugin: rec.id });
+        }
+      }
+      if (changed.length > 0 || restartRequired.length > 0) {
+        bus.signalAs({ plugin: "core" }, "core.config.changed", {
+          changed,
+          restartRequired: restartRequired.map((r) => r.plugin),
+        });
+      }
+      return { ok: true, changed, restartRequired, errors: [] };
+    };
+
+    let reloading: Promise<unknown> = Promise.resolve();
     let closing = false;
     const kernel: ValetKernel = {
       valetHome,
       configPath,
-      config,
+      get config() {
+        return config;
+      },
+      reload() {
+        const run = reloading.then(doReload);
+        reloading = run.catch(() => undefined);
+        return run;
+      },
       bus,
       store,
       scopes,
@@ -175,6 +273,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
               state: r.state as PluginStatus["state"],
               ...(r.error === undefined ? {} : { error: r.error }),
               ...(r.order === undefined ? {} : { order: r.order }),
+              ...(pendingRestart.has(r.id) ? { restartRequired: pendingRestart.get(r.id) as string } : {}),
             };
           })
           .sort(

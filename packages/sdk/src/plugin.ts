@@ -20,7 +20,13 @@ export interface PluginContext<Config = unknown> {
     readonly dir: string;
     readonly manifest: PluginManifest;
   };
+  /** The plugin's current config block; reflects the latest successful reload. */
   readonly config: Config;
+  /**
+   * Called after a reload changed this plugin's config block, with the validated new and previous values.
+   * Throw to say the change needs a restart. A plugin without a listener is reported as restart-required.
+   */
+  onConfigChange(fn: (next: Config, prev: Config) => void | Promise<void>): void;
   readonly log: Logger;
   readonly events: PluginEventBus;
   readonly scopes: ScopeRegistry;

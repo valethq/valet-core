@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "fx-live",
+  "name": "live",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "configSchema": {
+    "type": "object",
+    "properties": { "n": { "type": "integer" }, "fail": { "type": "boolean" } },
+    "additionalProperties": false
+  }
+}

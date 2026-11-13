@@ -45,6 +45,7 @@ declare module "./events" {
       offset: number;
     };
     "run.status": { sessionId: string; runId: string; status: string };
+    "core.config.changed": { changed: string[]; restartRequired: string[] };
     "core.hook.error": { eventName: string; phase: HookPhase; plugin: string | undefined; error: unknown };
   }
 }

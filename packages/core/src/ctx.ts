@@ -11,6 +11,8 @@ import type { OpenedStore } from "./store";
 export interface PluginRuntime {
   readonly ctx: PluginContext;
   readonly abort: AbortController;
+  /** Swaps the config and runs the plugin's listeners. False when it has none; a throwing listener restores the old config. */
+  applyConfig(next: Record<string, unknown>): Promise<boolean>;
   /** Runs onDispose fns (reverse registration order), then disposes every registered view. */
   dispose(): Promise<void>;
 }
@@ -39,6 +41,11 @@ export function buildPluginContext(
   const ws = deps.ws.forPlugin(plugin.id, namespace);
   const abort = new AbortController();
   const onDispose: (() => void | Promise<void>)[] = [];
+  const configListeners: ((
+    next: Record<string, unknown>,
+    prev: Record<string, unknown>,
+  ) => void | Promise<void>)[] = [];
+  let current = config;
 
   const data = join(deps.valetHome, "data", plugin.id);
   const cache = join(deps.valetHome, "cache", plugin.id);
@@ -47,7 +54,12 @@ export function buildPluginContext(
 
   const ctx: PluginContext = {
     plugin: { id: plugin.id, version: plugin.version, dir: plugin.dir, manifest: plugin.manifest },
-    config,
+    get config() {
+      return current;
+    },
+    onConfigChange(fn) {
+      configListeners.push(fn as (typeof configListeners)[number]);
+    },
     log,
     events,
     scopes,
@@ -66,6 +78,18 @@ export function buildPluginContext(
   return {
     ctx,
     abort,
+    async applyConfig(next) {
+      if (configListeners.length === 0) return false;
+      const prev = current;
+      current = next;
+      try {
+        for (const fn of configListeners) await fn(next, prev);
+      } catch (error) {
+        current = prev;
+        throw error;
+      }
+      return true;
+    },
     async dispose() {
       for (const fn of onDispose.reverse()) {
         try {
