@@ -56,6 +56,10 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
     ws: kernel.ws,
     plugins: () => kernel.plugins(),
     logger: log,
+    identify: async (req) => {
+      const r = await identify(req);
+      return r.ok ? r.principal : undefined;
+    },
     ...(opts.ringSize === undefined ? {} : { ringSize: opts.ringSize }),
   });
   // Plugin ctx.ws.publish() reaches live sockets through the hub.
@@ -88,6 +92,16 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
   );
   coreEvents.after("run.end", (e) => hub.publish(`session:${e.payload.run.sessionId}`, "run.end", e.payload));
   coreEvents.onSignal("run.status", (p) => hub.publish(`session:${p.sessionId}`, "run.status", p));
+
+  let reidentifyTimer: ReturnType<typeof setTimeout> | undefined;
+  coreEvents.after("identity.changed", () => {
+    if (reidentifyTimer !== undefined) return;
+    reidentifyTimer = setTimeout(() => {
+      reidentifyTimer = undefined;
+      void hub.reidentifySockets();
+    }, 250);
+  });
+  let reidentifyInterval: ReturnType<typeof setInterval> | undefined;
 
   const coreScopes = kernel.scopes.forPlugin("core", []);
   let server: Server<WsSocketData> | undefined;
@@ -275,7 +289,7 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
         }
         case "ws": {
           const upgraded = srv.upgrade(req, {
-            data: { caller, principal, url, subs: new Set<string>() },
+            data: { caller, principal, url, subs: new Set<string>(), headers: [...req.headers] },
           });
           return upgraded
             ? undefined
@@ -304,12 +318,17 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
           close: (ws) => hub.close(ws),
         },
       });
+      reidentifyInterval = setInterval(() => void hub.reidentifySockets(), 60_000);
       // Seed the "plugins" topic so late subscribers can catch up on boot-time states.
       for (const p of kernel.plugins()) hub.publish("plugins", "plugin.state", p);
       log.info("control plane listening", { host, port: server.port });
     },
 
     stop(): void {
+      clearInterval(reidentifyInterval);
+      clearTimeout(reidentifyTimer);
+      reidentifyInterval = undefined;
+      reidentifyTimer = undefined;
       server?.stop(true);
       server = undefined;
     },

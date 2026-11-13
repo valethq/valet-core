@@ -28,6 +28,7 @@ declare module "./events" {
       /** The plugin that owns the matched route or topic prefix, when there is one. */
       plugin?: string;
     };
+    "identity.changed": { principalId?: string };
     "core.ready": Record<string, never>;
     "core.shutdown": Record<string, never>;
   }

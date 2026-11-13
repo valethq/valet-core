@@ -135,6 +135,7 @@ export interface Store {
       runId?: string;
       origin?: Message["origin"];
       status?: Message["status"];
+      meta?: Record<string, unknown>;
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult>;
     /** Opens a streaming part; deltas go out as `message.delta` signals and are checkpointed to the row every 500ms. */
