@@ -378,6 +378,7 @@ export class StoreView implements Store {
       runId?: string;
       origin?: Message["origin"];
       status?: Message["status"];
+      meta?: Record<string, unknown>;
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult> => {
       const now = Date.now();
@@ -395,7 +396,7 @@ export class StoreView implements Store {
         runId: m.runId ?? null,
         status: m.status ?? "complete",
         origin: m.origin ?? null,
-        meta: {},
+        meta: m.meta ?? {},
         createdAt: now,
         updatedAt: now,
       };

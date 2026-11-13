@@ -14,6 +14,7 @@ interface AuthConfig {
 export default definePlugin<AuthConfig>({
   async activate(ctx) {
     const cfg = ctx.config;
+    let revoked = false;
     const principal = ctx.store.principals.resolveIdentity("fixture", cfg.externalId ?? "fixture-user", {
       displayName: cfg.displayName ?? "Fixture User",
     });
@@ -23,11 +24,25 @@ export default definePlugin<AuthConfig>({
     ctx.scopes.provide("identity", {
       authenticate(req) {
         if (cfg.deny === true) throw new ServiceDeniedError("fixture identity denied");
-        if (cfg.token !== undefined && req.headers.get("authorization") === `Bearer ${cfg.token}`) {
+        if (
+          cfg.token !== undefined &&
+          !revoked &&
+          req.headers.get("authorization") === `Bearer ${cfg.token}`
+        ) {
           return { principalId: principal.id, credentialId: "fixture-bearer" };
         }
         return undefined;
       },
     });
+    ctx.http.route(
+      "POST",
+      "/revoke",
+      async () => {
+        revoked = true;
+        await ctx.events.emit("identity.changed", {});
+        return Response.json({ ok: true });
+      },
+      { public: true },
+    );
   },
 });
