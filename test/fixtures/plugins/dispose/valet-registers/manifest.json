@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-registers",
+  "name": "valet-registers",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "provides": ["dispose-scope@1"]
+}

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "valet-stamper",
+  "name": "valet-stamper",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "valet-watcher": "^0.1.0" },
+  "events": { "namespace": "stamper" }
+}

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "valet-needs-needs",
+  "name": "nn",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": { "valet-needs-ghost": "^0.1.0" }
+}

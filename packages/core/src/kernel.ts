@@ -1,0 +1,223 @@
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+import type { ValetPlugin } from "@valethq/sdk";
+import { createCoreBus } from "./bus";
+import type { CoreBus } from "./bus/types";
+import { type ValetConfig, defaultValetHome, loadConfig } from "./config";
+import { type CtxDeps, type PluginRuntime, buildPluginContext } from "./ctx";
+import { type HttpRegistry, type WsRegistry, createHttpRegistry, createWsRegistry } from "./hosts";
+import { type PluginRecord, discoverPlugins, resolvePlugins, unmetAtActivation } from "./loader";
+import { type CoreLogger, createLogger } from "./log";
+import { CORE_SCOPE_DEFS, type CoreScopes, createScopeRegistry } from "./scopes";
+import { type OpenedStore, openStore } from "./store";
+
+const ACTIVATION_TIMEOUT_MS = 15_000;
+const DEACTIVATION_TIMEOUT_MS = 5_000;
+
+export interface PluginStatus {
+  id: string;
+  version?: string;
+  state: "active" | "failed" | "disabled";
+  error?: string;
+  order?: number;
+}
+
+export interface BootOptions {
+  valetHome?: string;
+  /** Defaults to <valetHome>/valet.sqlite; ":memory:" for tests. */
+  dbPath?: string;
+  /** Defaults to 15000 (5.2 step 5). */
+  activationTimeoutMs?: number;
+  /** Defaults to 5000 (5.2 step 7). */
+  deactivationTimeoutMs?: number;
+  /** Stdout sink for the JSONL logger (tests). */
+  out?: (line: string) => void;
+  /** Runs after the bus is created and before plugins load (tests). */
+  tapBus?: (bus: CoreBus) => void;
+}
+
+export interface ValetKernel {
+  readonly valetHome: string;
+  readonly configPath: string;
+  readonly config: ValetConfig;
+  readonly bus: CoreBus;
+  readonly store: OpenedStore;
+  readonly scopes: CoreScopes;
+  readonly http: HttpRegistry;
+  readonly ws: WsRegistry;
+  readonly log: CoreLogger;
+  /** Each plugin's state, error and load order (5.2: GET /api/core/plugins). */
+  plugins(): PluginStatus[];
+  shutdown(): Promise<void>;
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+
+async function importPlugin(rec: PluginRecord): Promise<ValetPlugin> {
+  const main = rec.manifest?.main ?? "";
+  const mod = (await import(resolve(rec.dir, main))) as Record<string, unknown>;
+  // spec-gap: the doc never names the export; accept a default export or a named "plugin".
+  const plugin = (mod.default ?? mod.plugin) as ValetPlugin | undefined;
+  if (!plugin || typeof plugin.activate !== "function") {
+    throw new Error(`entry "${main}" does not export a plugin (definePlugin result)`);
+  }
+  return plugin;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Boots the kernel: config, store, plugin discovery/activation, then core.ready (5.2). */
+export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
+  const valetHome = opts.valetHome ?? defaultValetHome();
+  mkdirSync(valetHome, { recursive: true });
+  const { configPath, config } = loadConfig(valetHome);
+  const log = createLogger({ valetHome, out: opts.out });
+  const coreLog = log.forPlugin("core");
+
+  const bus = createCoreBus({
+    logger: coreLog,
+    onHookError(report) {
+      try {
+        bus.signalAs({ plugin: "core" }, "core.hook.error", report);
+      } catch (error) {
+        coreLog.error("core.hook.error signal failed", { error: errorMessage(error) });
+      }
+    },
+  });
+  opts.tapBus?.(bus);
+
+  const store = await openStore({ valetHome, dbPath: opts.dbPath, bus, logger: coreLog });
+  try {
+    // 7.4: find the leftovers of an unclean stop before plugins activate.
+    const interrupted = store.findInterruptedRuns();
+
+    const scopes = createScopeRegistry({ logger: coreLog, winners: config.scopes });
+    for (const def of CORE_SCOPE_DEFS) scopes.define(def);
+    const http = createHttpRegistry(config.server);
+    const ws = createWsRegistry();
+    const ctxDeps: CtxDeps = { valetHome, bus, store, scopes, http, ws, log };
+
+    const records = discoverPlugins(config, coreLog);
+    const byId = new Map(records.map((r) => [r.id, r]));
+    const loadOrder = resolvePlugins(records, config, coreLog);
+
+    // 5.2 step 5: activate sequentially in load order.
+    const activationTimeoutMs = opts.activationTimeoutMs ?? ACTIVATION_TIMEOUT_MS;
+    const activated: { rec: PluginRecord; plugin: ValetPlugin; runtime: PluginRuntime }[] = [];
+    for (const rec of loadOrder) {
+      const unmet = unmetAtActivation(rec, byId);
+      if (unmet !== undefined) {
+        rec.state = "failed";
+        rec.error = unmet;
+        coreLog.warn(`plugin "${rec.id}" skipped: ${unmet}`);
+        continue;
+      }
+      let runtime: PluginRuntime | undefined;
+      try {
+        const plugin = await importPlugin(rec);
+        const manifest = rec.manifest;
+        if (!manifest) throw new Error("manifest missing at activation");
+        runtime = buildPluginContext(
+          ctxDeps,
+          { id: rec.id, version: manifest.version, dir: rec.dir, manifest },
+          config.plugins[rec.id]?.config ?? {},
+        );
+        const ctx = runtime.ctx;
+        await withTimeout(
+          Promise.resolve().then(() => plugin.activate(ctx)),
+          activationTimeoutMs,
+          `plugin "${rec.id}" activation`,
+        );
+        rec.state = "active";
+        activated.push({ rec, plugin, runtime });
+        coreLog.info(`plugin "${rec.id}" active`, { plugin: rec.id, order: rec.order });
+      } catch (error) {
+        rec.state = "failed";
+        rec.error = errorMessage(error);
+        coreLog.error(`plugin "${rec.id}" failed to activate: ${rec.error}`, { plugin: rec.id });
+        // 5.2 step 5: dispose anything it registered; hard dependents fail next.
+        await runtime?.dispose();
+      }
+    }
+
+    // 5.2 step 6: core.ready once every plugin has settled, then run.interrupted.
+    await bus.emitAs({ plugin: "core" }, "core.ready", {});
+    for (const run of interrupted) {
+      await bus.emitAs({ plugin: "core" }, "run.interrupted", { run });
+    }
+
+    let closing = false;
+    const kernel: ValetKernel = {
+      valetHome,
+      configPath,
+      config,
+      bus,
+      store,
+      scopes,
+      http,
+      ws,
+      log,
+      plugins() {
+        return records
+          .filter((r) => r.state !== "pending")
+          .map((r): PluginStatus => {
+            return {
+              id: r.id,
+              ...(r.manifest?.version === undefined ? {} : { version: r.manifest.version }),
+              state: r.state as PluginStatus["state"],
+              ...(r.error === undefined ? {} : { error: r.error }),
+              ...(r.order === undefined ? {} : { order: r.order }),
+            };
+          })
+          .sort(
+            (a, b) =>
+              (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER) ||
+              a.id.localeCompare(b.id),
+          );
+      },
+      async shutdown() {
+        if (closing) return;
+        closing = true;
+        // 5.2 step 7: core.shutdown, then deactivate in reverse order (5s each),
+        // aborting each ctx.signal. Then checkpoint SQLite.
+        await bus.emitAs({ plugin: "core" }, "core.shutdown", {}).catch((error: unknown) => {
+          coreLog.error("core.shutdown emit failed", { error: errorMessage(error) });
+        });
+        const deactivationTimeoutMs = opts.deactivationTimeoutMs ?? DEACTIVATION_TIMEOUT_MS;
+        for (const { rec, plugin, runtime } of activated.slice().reverse()) {
+          try {
+            await withTimeout(
+              Promise.resolve().then(() => plugin.deactivate?.()),
+              deactivationTimeoutMs,
+              `plugin "${rec.id}" deactivation`,
+            );
+          } catch (error) {
+            coreLog.error(`plugin "${rec.id}" deactivation failed: ${errorMessage(error)}`, {
+              plugin: rec.id,
+            });
+          }
+          runtime.abort.abort();
+          await runtime.dispose();
+        }
+        try {
+          store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        } catch (error) {
+          coreLog.warn("sqlite checkpoint failed", { error: errorMessage(error) });
+        }
+        store.close();
+      },
+    };
+    return kernel;
+  } catch (error) {
+    store.close();
+    throw error;
+  }
+}

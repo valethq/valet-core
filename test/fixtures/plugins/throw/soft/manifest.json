@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "fx-throw-soft",
+  "name": "s",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "optionalDependencies": { "fx-thrower": "^0.1.0" }
+}
