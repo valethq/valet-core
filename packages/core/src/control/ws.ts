@@ -18,6 +18,9 @@ export interface WsSocketData {
   principal: Principal | undefined;
   url: URL;
   subs: Set<string>;
+  /** Upgrade request headers (cookie, authorization, ...) so identity providers can re-identify the socket. */
+  headers: [string, string][];
+  closed?: boolean;
 }
 
 const send = (ws: ServerWebSocket<WsSocketData>, frame: ServerFrame): void => {
@@ -33,6 +36,8 @@ export interface WsHubDeps {
   ws: WsRegistry;
   plugins(): PluginStatus[];
   logger: Logger;
+  /** Re-runs the upgrade-time identification; undefined means anonymous or refused. */
+  identify(req: Request): Promise<Principal | undefined>;
   /** Ring buffer per topic (10.3: 2,000 frames). */
   ringSize?: number;
 }
@@ -80,7 +85,7 @@ export class WsHub {
     this.#buffers.set(topic, buffer);
     const frame: ServerFrame = { type: "event", topic, seq, name, data };
     for (const ws of this.#sockets) {
-      if (ws.data.subs.has(topic)) send(ws, frame);
+      if (!ws.data.closed && ws.data.subs.has(topic)) send(ws, frame);
     }
   };
 
@@ -89,8 +94,34 @@ export class WsHub {
   }
 
   close(ws: ServerWebSocket<WsSocketData>): void {
+    ws.data.closed = true;
     this.#sockets.delete(ws);
     ws.data.subs.clear();
+  }
+
+  /** Closes (4401) every open socket whose credential no longer identifies the same principal. */
+  async reidentifySockets(): Promise<void> {
+    await Promise.all(
+      [...this.#sockets].map(async (ws) => {
+        const { headers, url, principal } = ws.data;
+        let current: Principal | undefined;
+        try {
+          current = await this.#deps.identify(new Request(url.href, { headers }));
+        } catch (error) {
+          this.#deps.logger.error("ws re-identify failed", { error: String(error) });
+        }
+        if (current === undefined || current.id !== principal?.id) {
+          ws.data.closed = true;
+          ws.data.subs.clear();
+          // spec-gap: ServerFrame has no error frame, so the close code is the only signal.
+          try {
+            ws.close(4401, "unauthenticated");
+          } catch {
+            // already closing
+          }
+        }
+      }),
+    );
   }
 
   async message(ws: ServerWebSocket<WsSocketData>, raw: string | Buffer): Promise<void> {

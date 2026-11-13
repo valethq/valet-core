@@ -436,3 +436,60 @@ describe("websocket", () => {
     ws.close();
   });
 });
+
+describe("revocation and idempotent send", () => {
+  const authEnv = () =>
+    up({
+      fixtures: ["auth"],
+      plugins: { "valet-fixture-auth": { config: { token: "tok", externalId: "asher", role: "owner" } } },
+    });
+  const closeOf = (ws: WebSocket) =>
+    new Promise<number>((res) => ws.addEventListener("close", (e) => res(e.code), { once: true }));
+
+  test("identity.changed closes sockets whose credential stopped identifying (4401)", async () => {
+    const env = await authEnv();
+    const ws = await wsConnect(env.base, AUTH);
+    const closed = closeOf(ws);
+    const res = await fetch(`${env.base}/plugins/valet-fixture-auth/revoke`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await closed).toBe(4401);
+  });
+
+  test("identity.changed leaves still-identified sockets open", async () => {
+    const env = await authEnv();
+    const ws = await wsConnect(env.base, AUTH);
+    let closed = false;
+    ws.addEventListener("close", () => {
+      closed = true;
+    });
+    await env.kernel.bus.emitAs({ plugin: "identity" }, "identity.changed", {});
+    await new Promise((r) => setTimeout(r, 500));
+    expect(closed).toBe(false);
+    const c = collect(ws);
+    send(ws, { type: "ping" });
+    await c.next((f) => f.type === "pong");
+    ws.close();
+  });
+
+  test("duplicate clientMessageId returns the first message and creates one", async () => {
+    const env = await authEnv();
+    const project = await createProject(env.base);
+    const session = await createSession(env.base, project.id);
+    const body = {
+      role: "user",
+      parts: [{ type: "text", text: "hi" }],
+      clientMessageId: "c-1",
+    };
+    const path = `/api/core/sessions/${session.id}/messages`;
+    const first = await post(env.base, path, body);
+    expect(first.status).toBe(201);
+    const a = (await first.json()) as { message: { id: string; meta: Record<string, unknown> } };
+    expect(a.message.meta.clientMessageId).toBe("c-1");
+    const second = await post(env.base, path, body);
+    expect(second.status).toBe(200);
+    expect(((await second.json()) as typeof a).message.id).toBe(a.message.id);
+    const list = (await (await fetch(`${env.base}${path}`, { headers: AUTH })).json()) as unknown[];
+    expect(list).toHaveLength(1);
+    expect((await post(env.base, path, { ...body, clientMessageId: "x".repeat(101) })).status).toBe(400);
+  });
+});
