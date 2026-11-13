@@ -15,6 +15,9 @@ export type ServerFrame =
   | { type: "pong" };
 
 export interface WsHost {
-  handle(method: string, fn: (params: unknown, ctx: RequestContext) => unknown | Promise<unknown>): Disposable;
+  handle(
+    method: string,
+    fn: (params: unknown, ctx: RequestContext) => unknown | Promise<unknown>,
+  ): Disposable;
   publish(topic: string, name: string, data: unknown): void;
 }

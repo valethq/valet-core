@@ -59,8 +59,10 @@ export interface EmitResult<P> {
 }
 
 /** Extended by declaration merging; plugin events are named "<namespace>.<rest>". */
+// biome-ignore lint/suspicious/noEmptyInterface: spec: open interface extended by declaration merging
 export interface ValetEvents {}
 /** High-frequency, after-only signals. */
+// biome-ignore lint/suspicious/noEmptyInterface: spec: open interface extended by declaration merging
 export interface ValetSignals {}
 
 type EvName = Extract<keyof ValetEvents, string>;

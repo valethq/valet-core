@@ -1,2 +1,2 @@
 export { createCoreBus } from "./bus";
-export type { CoreBus, CoreBusOptions, HookErrorReport, ScopedPluginEventBus } from "./types";
+export type { ActionResult, CoreBus, CoreBusOptions, HookErrorReport, ScopedPluginEventBus } from "./types";

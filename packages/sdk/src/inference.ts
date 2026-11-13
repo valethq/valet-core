@@ -71,7 +71,10 @@ export interface AgentOpenOptions {
 export interface AgentSession {
   /** Persisted on the session so it can be reopened after a restart. */
   readonly resumeId: string;
-  prompt(input: { content: ModelContent[]; preamble?: string }, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  prompt(
+    input: { content: ModelContent[]; preamble?: string },
+    signal: AbortSignal,
+  ): AsyncIterable<AgentEvent>;
   setModel?(model: string): Promise<void>;
   close(): Promise<void>;
 }
