@@ -287,7 +287,14 @@ export class StoreView implements Store {
     ): Promise<Session | CancelledResult> => {
       const current = this.#getSession(id);
       if (!current) throw new Error(`unknown session "${id}"`);
-      const session: Session = { ...current, ...patch, updatedAt: Date.now() };
+      const session: Session = {
+        ...current,
+        title: patch.title === undefined ? current.title : patch.title,
+        color: patch.color === undefined ? current.color : patch.color,
+        status: patch.status === undefined ? current.status : patch.status,
+        settings: patch.settings === undefined ? current.settings : patch.settings,
+        updatedAt: Date.now(),
+      };
       return this.#action(this.#caller, "session.update", { session, patch }, ({ session: final }) =>
         this.#deps.db.transaction(() => {
           this.#deps.db
