@@ -7,5 +7,18 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/valethq/valet-core.git",
+    "directory": "packages/sdk"
+  },
+  "files": [
+    "src",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
