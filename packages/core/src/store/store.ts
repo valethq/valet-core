@@ -745,7 +745,7 @@ class DbPartWriter implements PartWriter {
   readonly #caller: Caller;
   readonly #sessionId: string;
   readonly #messageId: string;
-  /** null for parts that are replaced whole (compaction) and never receive deltas. */
+  /** null for parts that are written whole (compaction, file, notice) and never receive deltas. */
   readonly #kind: "text" | "reasoning" | "tool-output" | null;
   #data: PartData;
   #closed = false;
@@ -758,11 +758,14 @@ class DbPartWriter implements PartWriter {
     this.#messageId = part.messageId;
     this.#sessionId = sessionId;
     this.#data = part.data;
-    if (part.data.type === "text") this.#kind = "text";
-    else if (part.data.type === "reasoning") this.#kind = "reasoning";
-    else if (part.data.type === "tool-call") this.#kind = "tool-output";
-    else if (part.data.type === "compaction") this.#kind = null;
-    else throw new Error(`part type "${part.data.type}" does not stream`);
+    this.#kind =
+      part.data.type === "text"
+        ? "text"
+        : part.data.type === "reasoning"
+          ? "reasoning"
+          : part.data.type === "tool-call"
+            ? "tool-output"
+            : null;
     deps.liveParts.set(part.id, this.#data);
   }
 

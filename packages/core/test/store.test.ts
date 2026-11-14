@@ -230,6 +230,30 @@ describe("messages", () => {
     });
   });
 
+  test("file and notice parts open and close whole, like compaction, and take no deltas", async () => {
+    const project = await makeProject();
+    const session = await makeSession(project.id);
+    const created = await view.messages.create({
+      sessionId: session.id,
+      role: "assistant",
+      status: "streaming",
+      parts: [],
+    });
+    if (isCancelled(created)) throw new Error("cancelled");
+    const file = { type: "file", blobId: "blb_1", name: "a.png", mime: "image/png" } as const;
+    const notice = { type: "notice", level: "info", text: "hi" } as const;
+    for (const data of [file, notice]) {
+      const writer = view.messages.openPart(created.message.id, data);
+      expect(() => writer.append("x")).toThrow("takes replace(), not deltas");
+      writer.close("complete");
+    }
+    const parts = view.messages.list(session.id)[0]?.parts ?? [];
+    expect(parts.map((p) => [p.status, p.data])).toEqual([
+      ["complete", file],
+      ["complete", notice],
+    ]);
+  });
+
   test("deltas carry the pre-append offset for text and tool-output parts", async () => {
     const project = await makeProject();
     const session = await makeSession(project.id);
