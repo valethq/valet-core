@@ -3,12 +3,20 @@ import {
   type CancelledResult,
   type Principal,
   type RequestContext,
+  type Role,
   ServiceDeniedError,
   type Session,
   type Store,
 } from "@valethq/sdk";
 import type { PluginStatus, ReloadResult } from "../kernel";
 import { matchSegments, splitPath } from "./router";
+
+const ROLE_RANK: Record<Role, number> = { owner: 3, trusted: 2, guest: 1 };
+
+/** The caller's actor role, or "guest" when the caller has no actor (core and plugins). */
+export function roleOf(caller: Caller): Role {
+  return caller.actor?.role ?? "guest";
+}
 
 export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -80,6 +88,8 @@ interface RestRoute {
   method: string;
   pattern: string[];
   handler: RestHandler;
+  /** Lowest actor role the route serves. spec-gap: defaults to "trusted" (owner-only routes say so). */
+  minRole?: Role;
 }
 
 const num = (v: string | null): number | undefined => (v === null ? undefined : Number(v));
@@ -93,10 +103,11 @@ export interface RestDeps {
 }
 
 export function restRoutes(deps: RestDeps): RestRoute[] {
-  const r = (method: string, pattern: string, handler: RestHandler): RestRoute => ({
+  const r = (method: string, pattern: string, handler: RestHandler, minRole?: Role): RestRoute => ({
     method,
     pattern: splitPath(pattern),
     handler,
+    ...(minRole === undefined ? {} : { minRole }),
   });
 
   return [
@@ -187,6 +198,11 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (typeof b.role !== "string" || !Array.isArray(b.parts)) {
         return errorJson(400, "bad_request", "role and parts are required");
       }
+      // A request may only author as itself. Claiming another principal here would stamp the
+      // write with that principal's role and author, which no later hook can tell apart.
+      if (b.authorPrincipalId !== undefined && b.authorPrincipalId !== ctx.caller.actor?.principalId) {
+        return errorJson(403, "forbidden", "authorPrincipalId must be the authenticated principal");
+      }
       const clientId = b.clientMessageId;
       if (clientId !== undefined && (typeof clientId !== "string" || clientId.length > 100)) {
         return errorJson(400, "bad_request", "clientMessageId must be a string of at most 100 chars");
@@ -236,28 +252,45 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       const principal = store.principals.get(ctx.params.id as string);
       return principal ? json(principal) : errorJson(404, "not_found", "unknown principal");
     }),
-    r("POST", "/principals/:id/link", async (req, ctx, store) => {
-      const b = await body(req);
-      if (typeof b.platform !== "string" || typeof b.externalId !== "string") {
-        return errorJson(400, "bad_request", "platform and externalId are required strings");
-      }
-      await store.principals.link(ctx.params.id as string, b.platform, b.externalId);
-      return json({ ok: true });
-    }),
-    r("POST", "/principals/:id/role", async (req, ctx, store) => {
-      const b = await body(req);
-      if (!["owner", "trusted", "guest"].includes(b.role as string)) {
-        return errorJson(400, "bad_request", "role must be owner, trusted or guest");
-      }
-      await store.principals.setRole(ctx.params.id as string, b.role as Principal["role"]);
-      return json({ ok: true });
-    }),
+    // Identity and role changes are owner-only: a trusted or guest principal must not be able
+    // to link a login or rewrite a role, which is an authorization change, not a data write.
+    r(
+      "POST",
+      "/principals/:id/link",
+      async (req, ctx, store) => {
+        const b = await body(req);
+        if (typeof b.platform !== "string" || typeof b.externalId !== "string") {
+          return errorJson(400, "bad_request", "platform and externalId are required strings");
+        }
+        await store.principals.link(ctx.params.id as string, b.platform, b.externalId);
+        return json({ ok: true });
+      },
+      "owner",
+    ),
+    r(
+      "POST",
+      "/principals/:id/role",
+      async (req, ctx, store) => {
+        const b = await body(req);
+        if (!["owner", "trusted", "guest"].includes(b.role as string)) {
+          return errorJson(400, "bad_request", "role must be owner, trusted or guest");
+        }
+        await store.principals.setRole(ctx.params.id as string, b.role as Principal["role"]);
+        return json({ ok: true });
+      },
+      "owner",
+    ),
 
-    r("GET", "/plugins", async () => json(deps.plugins())),
-    r("POST", "/config/reload", async () => {
-      const result = await deps.reload();
-      return json(result, result.ok ? 200 : 400);
-    }),
+    r("GET", "/plugins", async () => json(deps.plugins()), "owner"),
+    r(
+      "POST",
+      "/config/reload",
+      async () => {
+        const result = await deps.reload();
+        return json(result, result.ok ? 200 : 400);
+      },
+      "owner",
+    ),
 
     r("GET", "/blobs/:id", async (_req, ctx) => {
       const meta = deps.blobMeta(ctx.params.id as string);
@@ -286,17 +319,21 @@ export function matchRest(
   deps: RestDeps,
   method: string,
   path: string,
-): { handler: RestHandler; params: Record<string, string> } | undefined {
+): { handler: RestHandler; params: Record<string, string>; minRole: Role } | undefined {
   const segments = splitPath(path).slice(2); // strip "api", "core"
   for (const route of restRoutes(deps)) {
     if (route.method !== method) continue;
     const params = matchSegments(route.pattern, segments);
-    if (params) return { handler: route.handler, params };
+    if (params) return { handler: route.handler, params, minRole: route.minRole ?? "trusted" };
   }
   return undefined;
 }
 
-/** Wraps a core REST handler: builds the caller-scoped store and maps failures. */
+/**
+ * Wraps a core REST handler: checks the caller's role against the route's minimum, builds the
+ * caller-scoped store and maps failures. Role is core's only control-plane authorization:
+ * `control.request` is keyed on plugin and cannot see an admin route's target.
+ */
 export function dispatchRest(
   deps: RestDeps,
   store: { forCaller(caller: Caller): Store },
@@ -307,6 +344,9 @@ export function dispatchRest(
 ): Promise<Response> {
   const match = matchRest(deps, method, path);
   if (!match) return Promise.resolve(errorJson(404, "not_found", "not found"));
+  if (ROLE_RANK[roleOf(ctx.caller)] < ROLE_RANK[match.minRole]) {
+    return Promise.resolve(errorJson(403, "forbidden", `this route requires the "${match.minRole}" role`));
+  }
   const boundCtx: RequestContext = { ...ctx, params: match.params };
   return guard(() => match.handler(req, boundCtx, store.forCaller(ctx.caller)));
 }

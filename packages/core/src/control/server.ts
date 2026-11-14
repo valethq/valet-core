@@ -181,9 +181,13 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
             }),
           };
         }
-        // A broken provider fails closed downstream (anonymous -> 401 on non-public routes).
+        // A broken provider fails closed: never skip it and let a later provider (or anonymous)
+        // stand in for it, or one plugin's bug silently bypasses authentication.
         log.error("identity provider failed", { plugin: provider.plugin, error: String(error) });
-        continue;
+        return {
+          ok: false,
+          res: errorJson(503, "identity_unavailable", "identity provider failed"),
+        };
       }
       if (auth !== undefined) {
         const principal = kernel.store.forCaller({ plugin: "core" }).principals.get(auth.principalId);

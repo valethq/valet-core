@@ -109,7 +109,9 @@ export class WsHub {
         try {
           current = await this.#deps.identify(new Request(url.href, { headers }));
         } catch (error) {
+          // A broken identity provider must not be read as "anonymous": keep the socket.
           this.#deps.logger.error("ws re-identify failed", { error: String(error) });
+          return;
         }
         if (current === undefined || current.id !== principal?.id) {
           ws.data.closed = true;
@@ -120,6 +122,10 @@ export class WsHub {
           } catch {
             // already closing
           }
+        } else if (current.id === principal?.id && current.role !== principal.role) {
+          // A role change on the same principal: the socket's caller still carries the old role.
+          ws.data.principal = current;
+          ws.data.caller = { ...ws.data.caller, actor: { principalId: current.id, role: current.role } };
         }
       }),
     );

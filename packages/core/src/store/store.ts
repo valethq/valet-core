@@ -701,10 +701,23 @@ export class StoreView implements Store {
       );
     },
 
-    // spec-gap: no principal.update event exists in 7.3, so this writes directly.
+    // spec-gap: no principal.update event exists in 7.3, so this emits its own action event
+    // (principal.role) so policy plugins can deny a change and auditors can see who made it.
     setRole: async (principalId: string, role: Role): Promise<void> => {
-      const res = this.#deps.db.query("UPDATE principals SET role = ? WHERE id = ?").run(role, principalId);
-      if (res.changes === 0) throw new Error(`unknown principal "${principalId}"`);
+      const principal = this.principals.get(principalId);
+      if (!principal) throw new Error(`unknown principal "${principalId}"`);
+      await this.#actionVoid(
+        this.#caller,
+        "principal.role",
+        { principal: { ...principal, role }, role, previous: principal.role },
+        ({ principal: p, role: finalRole }) =>
+          this.#deps.db.transaction(() => {
+            const res = this.#deps.db
+              .query("UPDATE principals SET role = ? WHERE id = ?")
+              .run(finalRole, p.id);
+            if (res.changes === 0) throw new Error(`unknown principal "${p.id}"`);
+          })(),
+      );
     },
   };
 

@@ -221,7 +221,7 @@ describe("identity + core REST", () => {
     const env = await up({
       fixtures: ["auth", "deny"],
       plugins: {
-        "valet-fixture-auth": { config: { token: "tok" } },
+        "valet-fixture-auth": { config: { token: "tok", role: "trusted" } },
         "valet-fixture-deny": { config: { deny: [{ kind: "http", path: "/api/core/projects" }] } },
       },
     });
@@ -360,7 +360,7 @@ describe("websocket", () => {
   test("sub/publish/seq, since replay, ping, call routing, plugin publish", async () => {
     const env = await up({
       fixtures: ["auth", "routes"],
-      plugins: { "valet-fixture-auth": { config: { token: "tok" } } },
+      plugins: { "valet-fixture-auth": { config: { token: "tok", role: "trusted" } } },
     });
 
     await expect(wsConnect(env.base)).rejects.toThrow();
@@ -461,7 +461,7 @@ describe("websocket", () => {
   test("gap when the requested seq fell out of the ring buffer", async () => {
     const env = await up({
       fixtures: ["auth"],
-      plugins: { "valet-fixture-auth": { config: { token: "tok" } } },
+      plugins: { "valet-fixture-auth": { config: { token: "tok", role: "trusted" } } },
       ringSize: 2,
     });
     const project = await createProject(env.base);

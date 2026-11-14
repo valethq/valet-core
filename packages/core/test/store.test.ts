@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   type Caller,
   type CancelledResult,
@@ -480,7 +480,7 @@ describe("blobs", () => {
     });
     expect(id).toStartWith("blb_");
     const path = view.blobs.path(id);
-    expect(path).toContain("/blobs/");
+    expect(path).toContain(`${sep}blobs${sep}`);
     expect(await Bun.file(path).bytes()).toEqual(new Uint8Array([1, 2, 3]));
   });
 });

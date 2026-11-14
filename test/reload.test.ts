@@ -69,9 +69,11 @@ describe("config reload", () => {
 
   test("config.toml is picked up on reload", async () => {
     const { kernel, home } = await up();
+    // Windows paths contain backslashes, which a TOML basic string reads as escapes.
+    const root = fxRoot("reload").replaceAll("\\", "/");
     writeFileSync(
       join(home, "config.toml"),
-      `pluginPaths = ["${fxRoot("reload")}"]\n[plugins.fx-live.config]\nn = 7\n`,
+      `pluginPaths = ["${root}"]\n[plugins.fx-live.config]\nn = 7\n`,
     );
     const result = await kernel.reload();
     expect(result.changed).toEqual(["fx-live"]);

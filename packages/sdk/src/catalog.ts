@@ -22,6 +22,9 @@ declare module "./events" {
     "run.interrupted": { run: Run };
     "tool.call": { runId: string; callId: string; name: string; input: unknown; role: Role };
     "principal.link": { principal: Principal; identity: { platform: string; externalId: string } };
+    // spec-gap: 7.3 has no role event; a role change is a principal change, so it gets its own
+    // action event so before hooks can veto it and after hooks can audit it.
+    "principal.role": { principal: Principal; role: Role; previous: Role };
     "control.request": {
       kind: "http" | "ws.sub" | "ws.call";
       method: string;
