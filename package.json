@@ -17,5 +17,10 @@
     "@valethq/core": "workspace:*",
     "@valethq/sdk": "workspace:*",
     "typescript": "^7.0.2"
+  },
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/valethq/valet-core.git"
   }
 }
