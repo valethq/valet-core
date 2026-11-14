@@ -1,12 +1,13 @@
-# valet-core agent rules (read first, follow exactly)
+# valet-core agent rules
 
-- `docs/ARCHITECTURE.md` is the normative spec. TypeScript interfaces in it are copied verbatim (names, fields, doc comments) into `packages/sdk`. Do not invent alternative designs; if the spec is silent, choose the simplest thing and leave a one-line `// spec-gap:` comment.
-- Runtime: Bun 1.4.4 (`~/.npm-global/bin/bun`; add `export PATH=$HOME/.npm-global/bin:$HOME/.local/bin:$PATH`). Bun workspaces, ESM, TypeScript `strict: true`, `noUncheckedIndexedAccess: true`. Tests use `bun test`. No build step; `main` points at `.ts`.
+- `docs/ARCHITECTURE.md` is the normative spec. TypeScript interfaces in it are copied verbatim (names, fields, doc comments) into `packages/sdk`. Do not invent alternative designs. If the spec is silent, choose the simplest thing and leave a one-line `// spec-gap:` comment.
+- Runtime: Bun 1.4.4 (`~/.npm-global/bin/bun`; `export PATH=$HOME/.npm-global/bin:$HOME/.local/bin:$PATH`). Bun workspaces, ESM, TypeScript `strict: true`, `noUncheckedIndexedAccess: true`. Tests use `bun test`. No build step; `main` points at `.ts`.
 - Packages: `packages/sdk` = `@valethq/sdk` (types plus tiny helpers `definePlugin`, `defineScope`, `ServiceDeniedError`; zero runtime deps). `packages/core` = `@valethq/core` (kernel + `valet` CLI). Core may depend on the SDK; the SDK never imports core. Plugins import only `@valethq/sdk`.
-- NO PRIVATE APIs: there is no `ctx.internal`, no core-only hook, no bypass flag, no special-casing of any plugin id. Base plugins get exactly the `PluginContext` every plugin gets.
+- No private APIs: no `ctx.internal`, no core-only hook, no bypass flag, no special-casing of any plugin id. Base plugins get exactly the `PluginContext` every plugin gets.
 - Caller identity: core stamps `Caller` on every emit, hook event, store write and scope call from the plugin's own `ctx`. A plugin can never set `caller.plugin`. Every before hook can `deny(reason)`; a deny cancels the action and is reported with `by` = the denying plugin id.
 - Control plane only: the HTTP/WS server serves JSON/MCP/webhooks to control valet. No static file serving, no HTML, no SPA, nothing claims `/` (it returns the JSON status doc). Plugin responses with `text/html` become 500. Every response gets `Content-Security-Policy: default-src 'none'`.
-- Dependencies: core needs almost none, so don't add any. Runtime code uses Bun built-ins and `@valethq/sdk` only; dev tooling is `typescript`, `@types/bun`, `@biomejs/biome`. Write small things yourself rather than pulling a package: a validator for the JSON-schema subset used (type/required/properties/items/enum/additionalProperties) instead of ajv, and `Bun.semver` for semver. A new runtime dependency in core needs a reason the architecture doc can't avoid.
-- Every change ships with tests. Before finishing, run and make pass: `bun run typecheck` (tsc --noEmit -p .), `bun run lint` (biome check .), `bun test`.
-- Do not edit `docs/` or `reference/`. Do not start long-running servers except inside tests (bind port 0). Commit your work to this repo.
+- Dependencies: core needs almost none, so do not add any. Runtime code uses Bun built-ins and `@valethq/sdk` only. Dev tooling is `typescript`, `@types/bun`, `@biomejs/biome`. Write small things yourself rather than pulling a package, except where the architecture doc says otherwise: a validator for the JSON-schema subset in use, and `Bun.semver` for semver. A new runtime dependency in core needs a reason the architecture doc cannot avoid.
+- Every change ships with tests. Before finishing, make these pass: `bun run typecheck` (`tsc --noEmit -p .`), `bun run lint` (`biome check .`), `bun test`.
+- Do not edit `docs/` or `reference/` unless the human tells you to in this session. Do not start long-running servers except inside tests (bind port 0).
+- Git: commit when the work is finished and the checks pass, unless it is extremely large, breaking or unfinished. Don't push unless asked. Author and committer rules are in `../AGENTS.md`.
 - Keep code comments minimal. Keep files small and named after what they hold.
