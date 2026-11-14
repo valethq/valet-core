@@ -80,7 +80,7 @@ graph TD
 | Config and secrets loading | Platforms (`valet-discord`), schedules (`valet-scheduler`), skills (`valet-skills`) |
 | Scope registry (provide/consume and cardinality) | Defining new scopes beyond the core set |
 
-Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is defined by `valet-contextmanager`, and core doesn't know it exists. Any plugin can define a scope the same way.
+Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`, `context@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is implemented and registered (`defineScope`) by `valet-contextmanager`; core only ships its types. Any plugin can define a scope of its own the same way.
 
 ## 4. Repo layout and packages
 
@@ -230,7 +230,7 @@ export interface ValetScopes {
   tools: ToolProvider;
   platform: MessagePlatform;
   identity: IdentityProvider;
-  // valet-contextmanager adds:  context: ContextManager
+  context: ContextManager;   // provided by valet-contextmanager
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 
@@ -294,6 +294,17 @@ interface ProviderBase {
   readonly id: string;     // "devin-cli"; also the scope key
   readonly label: string;
   listModels(): Promise<ModelInfo[]>;
+  /** The provider's Utility model: a cheap, fast model for small side jobs such as naming a session. */
+  readonly utility?: UtilityModel;
+}
+
+export interface UtilityRequest { system: string; prompt: string; maxOutputTokens?: number }
+
+export interface UtilityModel {
+  /** Id of the model side jobs run on, or undefined when the provider has none to offer. */
+  model(): string | undefined;
+  /** One short, tool-free completion on `model()`. Rejects when the call fails. */
+  complete(req: UtilityRequest, signal: AbortSignal): Promise<string>;
 }
 
 // ---- kind: "model" ----
@@ -443,9 +454,9 @@ export interface MessagePlatform {
 
 Inbound messages need no scope method. A platform plugin resolves the sender with `store.principals.resolveIdentity(...)`. It finds or creates the session bound to `(platform, conversationId)` and calls `store.messages.create(...)` with an `origin`. Outbound delivery is a hook: the platform plugin listens for `after:message.complete` on sessions bound to its platform. The `platform@1` scope exists so other plugins (the scheduler, the agent's `send_message` tool) can deliver to a binding without knowing which plugin owns it.
 
-### 6.4 `context@1` (defined by `valet-contextmanager`)
+### 6.4 `context@1` (provided by `valet-contextmanager`)
 
-Shown here because `valet-agent` depends on it. It is not a core scope.
+The types live in the SDK (`context.ts`), so `valet-agent` and the provider share one declaration. The scope is registered and implemented by `valet-contextmanager`.
 
 ```ts
 export interface PersonaFile { path: string; role: "agents" | "user" | "memory" | "soul" | "identity" | "daily" | "other"; content: string }
@@ -565,7 +576,7 @@ The bus is in memory and ephemeral. Durable facts go through the store, and the 
 | `project.create` / `project.update` | `{ project }` | |
 | `session.create` / `session.update` / `session.delete` | `{ session }`, `{ session, patch }` | UI list refresh |
 | `message.create` | `{ message, parts }` | before: slash commands (`/model`, `/compact`, `/new`), role policy. after: `valet-agent` queues a run for user messages. |
-| `message.complete` | `{ message }` (status changes to `complete`, `error` or `interrupted`) | after: platform delivery, title generation |
+| `message.complete` | `{ message }` (status changes to `complete`, `error` or `interrupted`) | after: platform delivery |
 | `run.start` / `run.update` / `run.end` | `{ run }` | `run.update` is emitted after every `runs.update` write, including usage-only patches, so live counters (e.g. context tokens) reach subscribers before the run ends |
 | `run.cancel` | `{ runId, by }` | `valet-agent` aborts the run's controller |
 | `run.interrupted` | `{ run }`, emitted after `core.ready` for runs found `running` at boot | `valet-agent` resume policy |
@@ -681,6 +692,7 @@ export interface Session {
 export interface SessionSettings {
   model?: { provider: string; model: string; fallbacks?: { provider: string; model: string }[] };
   persona?: string;                   // persona override; default comes from the project
+  titlePlaceholder?: string;          // title valet-agent derived from the first message; an auto title may replace it only while session.title still equals it
   [pluginNamespace: string]: unknown; // e.g. "agent": { queueMode: "interrupt" }
 }
 export interface Run { id: string; sessionId: string; triggerMessageId: string | null; status: "queued" | "running" | "complete" | "cancelled" | "error" | "interrupted"; role: Role; provider: string | null; model: string | null; startedAt: number | null; endedAt: number | null; error: string | null }
@@ -893,7 +905,7 @@ Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring
 
 ### 11.1 `valet-agent`
 
-- **Depends on:** `valet-contextmanager`. Requires `inference@1` and `context@1`. Optionally requires `tools@1`.
+- **Requires:** `inference@1` and `context@1`, not a particular plugin. Optionally requires `tools@1`.
 - **Owns:** the run queue for each session, queue/interrupt/steer modes, the tool loop for `model` providers, `AgentSession` bridging for `agent` providers, fallbacks, `tool.call` emission, and slash commands (`/model`, `/compact`, `/new`, `/stop`).
 - **Resume policy:**
   - On `run.interrupted`, it appends a `notice` part ("previous turn was interrupted by a restart") to the interrupted message.

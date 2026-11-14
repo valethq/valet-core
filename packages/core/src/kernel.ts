@@ -17,6 +17,8 @@ const DEACTIVATION_TIMEOUT_MS = 5_000;
 
 export interface PluginStatus {
   id: string;
+  /** Friendly display name from the manifest (e.g. "Claude Code"); UIs show it instead of the id. */
+  name?: string;
   version?: string;
   state: "active" | "failed" | "disabled";
   error?: string;
@@ -269,6 +271,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
           .map((r): PluginStatus => {
             return {
               id: r.id,
+              ...(r.manifest?.name === undefined ? {} : { name: r.manifest.name }),
               ...(r.manifest?.version === undefined ? {} : { version: r.manifest.version }),
               state: r.state as PluginStatus["state"],
               ...(r.error === undefined ? {} : { error: r.error }),

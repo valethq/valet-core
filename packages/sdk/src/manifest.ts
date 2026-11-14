@@ -3,6 +3,7 @@ export interface PluginManifest {
   schema: 1;
   /** Globally unique; matches the repo name, e.g. "valet-discord". */
   id: string;
+  /** Friendly display name shown in UIs, e.g. "Claude Code" for "valet-claudecode". */
   name: string;
   version: string; // semver
   description?: string;

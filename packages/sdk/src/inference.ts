@@ -16,6 +16,21 @@ interface ProviderBase {
   readonly id: string; // "devin-cli"; also the scope key
   readonly label: string;
   listModels(): Promise<ModelInfo[]>;
+  /** The provider's Utility model: a cheap, fast model for small side jobs such as naming a session. */
+  readonly utility?: UtilityModel;
+}
+
+export interface UtilityRequest {
+  system: string;
+  prompt: string;
+  maxOutputTokens?: number;
+}
+
+export interface UtilityModel {
+  /** Id of the model side jobs run on, or undefined when the provider has none to offer. */
+  model(): string | undefined;
+  /** One short, tool-free completion on `model()`. Rejects when the call fails. */
+  complete(req: UtilityRequest, signal: AbortSignal): Promise<string>;
 }
 
 // ---- kind: "model" ----

@@ -1,3 +1,4 @@
+import type { ContextManager } from "./context";
 import type { Caller } from "./events";
 import type { IdentityProvider } from "./identity";
 import type { InferenceProvider } from "./inference";
@@ -10,7 +11,7 @@ export interface ValetScopes {
   tools: ToolProvider;
   platform: MessagePlatform;
   identity: IdentityProvider;
-  // valet-contextmanager adds:  context: ContextManager
+  context: ContextManager; // defined and provided by valet-contextmanager
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 

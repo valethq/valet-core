@@ -26,6 +26,7 @@ export interface Session {
 export interface SessionSettings {
   model?: { provider: string; model: string; fallbacks?: { provider: string; model: string }[] };
   persona?: string; // persona override; default comes from the project
+  titlePlaceholder?: string; // title derived from the first message; an auto title may replace it only while session.title still equals it
   [pluginNamespace: string]: unknown; // e.g. "agent": { queueMode: "interrupt" }
 }
 export interface Run {
