@@ -9,6 +9,7 @@ export * from "./manifest";
 export * from "./platform";
 export * from "./plugin";
 export * from "./scopes";
+export * from "./settings";
 export * from "./store";
 export * from "./tools";
 export * from "./version";

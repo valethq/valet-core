@@ -4,6 +4,7 @@ import type { IdentityProvider } from "./identity";
 import type { InferenceProvider } from "./inference";
 import type { MessagePlatform } from "./platform";
 import type { Disposable } from "./plugin";
+import type { SettingsPanel } from "./settings";
 import type { ToolProvider } from "./tools";
 
 export interface ValetScopes {
@@ -12,6 +13,7 @@ export interface ValetScopes {
   platform: MessagePlatform;
   identity: IdentityProvider;
   context: ContextManager; // defined and provided by valet-contextmanager
+  settings: SettingsPanel; // defined by valet-ui
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 
