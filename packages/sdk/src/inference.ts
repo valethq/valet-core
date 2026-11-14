@@ -1,4 +1,4 @@
-import type { ToolSpec } from "./tools";
+import type { ToolResult, ToolSpec } from "./tools";
 
 export interface ModelInfo {
   id: string; // "claude-opus-5-5"
@@ -78,9 +78,30 @@ export interface AgentOpenOptions {
   cwd: string;
   model: string;
   resumeId?: string;
-  /** MCP servers the remote agent should connect to (valet's tools; see 6.2). */
-  mcpServers: { name: string; url: string; headers?: Record<string, string> }[];
+  /** Valet's tools for this session (see 6.2). The provider decides how to expose them to its agent. */
+  tools: ToolSurface;
   signal: AbortSignal;
+}
+
+/**
+ * Valet's tools as one provider sees them. Bound to the session: `list` and `call` follow whichever run
+ * is active. Valet filters the list for the run's role and exposure config, and runs the `tool.call` gate
+ * inside `call`, so a provider never has to enforce policy itself.
+ */
+export interface ToolSurface {
+  /** Tools this run may use, as of the run's start. Empty when no run is active. */
+  list(): ToolSpec[];
+  /** Runs one call through the gate, then the tool. A denied or failed call comes back as `isError`; it never throws. */
+  call(name: string, input: unknown, call: { callId: string; signal: AbortSignal }): Promise<ToolResult>;
+  /**
+   * Runs the `tool.call` gate for a call the provider is about to run itself (a built-in or native tool) and
+   * returns the verdict. Use `input` when present: a policy hook may rewrite it. Never throws.
+   */
+  authorize(
+    name: string,
+    input: unknown,
+    call: { callId: string },
+  ): Promise<{ input: unknown } | { denied: string }>;
 }
 
 export interface AgentSession {

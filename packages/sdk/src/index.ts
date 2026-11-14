@@ -4,6 +4,7 @@ export * from "./events";
 export * from "./http";
 export * from "./identity";
 export * from "./inference";
+export * from "./mcp";
 export * from "./manifest";
 export * from "./platform";
 export * from "./plugin";

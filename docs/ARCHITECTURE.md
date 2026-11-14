@@ -352,9 +352,19 @@ export interface AgentOpenOptions {
   cwd: string;
   model: string;
   resumeId?: string;
-  /** MCP servers the remote agent should connect to (valet's tools; see 6.2). */
-  mcpServers: { name: string; url: string; headers?: Record<string, string> }[];
+  /** Valet's tools for this session (see 6.2). The provider decides how to expose them to its agent. */
+  tools: ToolSurface;
   signal: AbortSignal;
+}
+
+/** Valet's tools as one provider sees them. Bound to the session: `list` and `call` follow the active run. */
+export interface ToolSurface {
+  /** Tools this run may use, as of the run's start. Empty when no run is active. */
+  list(): ToolSpec[];
+  /** Runs one call through the `tool.call` gate, then the tool. A denied or failed call returns `isError`; it never throws. */
+  call(name: string, input: unknown, call: { callId: string; signal: AbortSignal }): Promise<ToolResult>;
+  /** Runs the `tool.call` gate for a call the provider runs itself (a built-in or native tool). Returns the input to use, or a denial. */
+  authorize(name: string, input: unknown, call: { callId: string }): Promise<{ input: unknown } | { denied: string }>;
 }
 
 export interface AgentSession {
@@ -426,7 +436,7 @@ export interface ToolProvider {
 }
 ```
 
-`valet-agent` collects `scopes.all("tools")` for each run. Each provider lists only what it will serve for that run's role and caller. If a tool is called anyway, the provider throws `ServiceDeniedError`, which is recorded as a `denied` tool-call part. It wraps every call in the `tool.call` event (section 7.3), so policy plugins can deny or rewrite calls. For `agent`-kind providers, `valet-devin` serves the same filtered tool set as a per-run MCP endpoint at `/plugins/valet-devin/mcp/<runId>`, with a short-lived bearer token. That way Devin-backed sessions use `valet-exec` and the other tools, and their calls show up as ordinary tool parts.
+`valet-agent` collects `scopes.all("tools")` for each run and filters the result by the run's role and by its exposure config. It hands each provider a `ToolSurface` (6.1). The surface runs the `tool.call` event (section 7.3) before every call, so policy plugins can deny or rewrite it. A denial comes back to the provider as an `isError` result. How a provider exposes the surface is the provider's choice. `valet-claudecode` and `valet-devin` mount it as an MCP server on their own route, with a per-session bearer token, through the SDK's `toolEndpoint` helper, and pass that server to their agent. A `model`-kind provider takes the tool specs in its request instead. Either way the calls show up as ordinary tool parts.
 
 ### 6.3 `platform@1`: message platforms
 
