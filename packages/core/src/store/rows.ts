@@ -29,6 +29,7 @@ export function rowToSession(r: Row): Session {
     createdAt: r.created_at as number,
     updatedAt: r.updated_at as number,
     lastMessageAt: (r.last_message_at as number | null) ?? null,
+    lastResponseAt: (r.last_response_at as number | null) ?? null,
   };
 }
 

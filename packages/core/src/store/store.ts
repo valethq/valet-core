@@ -32,6 +32,10 @@ type EvName = Extract<keyof ValetEvents, string>;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["complete", "cancelled", "error", "interrupted"]);
 const PART_CHECKPOINT_MS = 500;
 
+/** Latest assistant message time for a session row, computed on read (no column to keep in sync). */
+const lastResponseAt = (sessionRef: string): string =>
+  `(SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = ${sessionRef} AND m.role = 'assistant') AS last_response_at`;
+
 export interface StoreDeps {
   db: Database;
   bus: CoreBus;
@@ -127,7 +131,9 @@ export class StoreView implements Store {
   // ---- reads (not events) ------------------------------------------------
 
   #getSession(id: string): Session | undefined {
-    const row = this.#deps.db.query("SELECT * FROM sessions WHERE id = ?").get(id);
+    const row = this.#deps.db
+      .query(`SELECT *, ${lastResponseAt("sessions.id")} FROM sessions WHERE id = ?`)
+      .get(id);
     return row === null ? undefined : rowToSession(row as Record<string, unknown>);
   }
 
@@ -234,7 +240,7 @@ export class StoreView implements Store {
         where.push("COALESCE(last_message_at, created_at) < ?");
         params.push(q.before);
       }
-      const sql = `SELECT * FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY COALESCE(last_message_at, created_at) DESC`;
+      const sql = `SELECT *, ${lastResponseAt("sessions.id")} FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY COALESCE(last_message_at, created_at) DESC`;
       const rows = (
         q.limit === undefined
           ? this.#deps.db.query(sql).all(...params)
@@ -262,6 +268,7 @@ export class StoreView implements Store {
         createdAt: now,
         updatedAt: now,
         lastMessageAt: null,
+        lastResponseAt: null,
       };
       return this.#action(this.#caller, "session.create", { session }, ({ session: final }) =>
         this.#deps.db.transaction(() => {
@@ -367,7 +374,7 @@ export class StoreView implements Store {
     findByBinding: (platform: string, conversationId: string): Session | undefined => {
       const row = this.#deps.db
         .query(
-          `SELECT s.* FROM sessions s JOIN session_bindings b ON b.session_id = s.id
+          `SELECT s.*, ${lastResponseAt("s.id")} FROM sessions s JOIN session_bindings b ON b.session_id = s.id
            WHERE b.platform = ? AND b.conversation_id = ?`,
         )
         .get(platform, conversationId);

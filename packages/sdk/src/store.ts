@@ -23,6 +23,8 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   lastMessageAt: number | null;
+  /** When the model last answered (latest assistant message); null until it has. */
+  lastResponseAt: number | null;
 }
 export interface SessionSettings {
   model?: { provider: string; model: string; fallbacks?: { provider: string; model: string }[] };
