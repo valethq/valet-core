@@ -84,6 +84,55 @@ describe("toolEndpoint", () => {
     expect(calls).toEqual([{ name: "echo", input: { a: 1 }, callId: expect.stringMatching(/^mcp_/) }]);
   });
 
+  test("a tool call answers as SSE when the client accepts it: headers first, the reply when the tool ends", async () => {
+    const { http, routes } = fakeHttp();
+    const endpoint = toolEndpoint(http, { serverName: "valet", version: "0.1.0" });
+    let finish: (r: ToolResult) => void = () => {};
+    const surface: ToolSurface = {
+      list: () => [],
+      authorize: async (_n, input) => ({ input }),
+      call: () => new Promise((resolve) => (finish = resolve)),
+    };
+    const entry = endpoint.expose("ses_2", surface);
+    const post = routes.get("POST /mcp/:sessionId") as RouteHandler;
+    const req = (body: unknown) =>
+      post(
+        new Request(entry.url, {
+          method: "POST",
+          headers: {
+            ...entry.headers,
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+          },
+          body: JSON.stringify(body),
+        }),
+        {
+          params: { sessionId: "ses_2" },
+          caller: {} as never,
+          principal: undefined,
+          url: new URL(entry.url),
+        },
+      );
+    const res = await req({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "slow", arguments: {} },
+    });
+    expect(res.headers.get("content-type")).toBe("text/event-stream"); // before the tool has finished
+    finish({ content: [{ type: "text", text: "done" }] });
+    const text = await res.text();
+    expect(text).toStartWith(": open\n\n");
+    const data = text.split("\n").find((l) => l.startsWith("data: ")) as string;
+    expect(JSON.parse(data.slice(6))).toEqual({
+      jsonrpc: "2.0",
+      id: 7,
+      result: { content: [{ type: "text", text: "done" }] },
+    });
+    const init = await req({ jsonrpc: "2.0", id: 8, method: "initialize", params: {} });
+    expect(init.headers.get("content-type")).toContain("application/json"); // only tool calls stream
+  });
+
   test("image results reach the harness as base64 when a blob reader is given", async () => {
     const { http, routes } = fakeHttp();
     const endpoint = toolEndpoint(http, {

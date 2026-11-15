@@ -53,7 +53,8 @@ async function toMcpResult(result: ToolResult, readBlob: ToolEndpointOptions["re
 }
 
 /**
- * Serves a session's ToolSurface as an MCP server (Streamable HTTP, JSON replies only). Each plugin that
+ * Serves a session's ToolSurface as an MCP server (Streamable HTTP: JSON replies, or SSE for tool calls when
+ * the client accepts it). Each plugin that
  * talks to an MCP-speaking harness mounts one of these on its own route, so the plugin serves the tools
  * itself and valet's core stays out of the transport.
  */
@@ -94,11 +95,16 @@ export function toolEndpoint(http: HttpHost, opts: ToolEndpointOptions): ToolEnd
     }
     const batch = Array.isArray(body);
     const messages: unknown[] = Array.isArray(body) ? body : [body];
-    const replies: unknown[] = [];
-    for (const msg of messages) {
-      const reply = await dispatch(exposure.surface, msg, req.signal);
-      if (reply) replies.push(reply);
-    }
+    const run = async () => {
+      const replies: unknown[] = [];
+      for (const msg of messages) {
+        const reply = await dispatch(exposure.surface, msg, req.signal);
+        if (reply) replies.push(reply);
+      }
+      return replies;
+    };
+    if (streams(req, messages)) return sse(run(), req.signal);
+    const replies = await run();
     if (replies.length === 0) return new Response(null, { status: 202 });
     return Response.json(batch ? replies : replies[0]);
   };
@@ -179,6 +185,57 @@ export function toolEndpoint(http: HttpHost, opts: ToolEndpointOptions): ToolEnd
       sessions.delete(sessionId);
     },
   };
+}
+
+/** Tool calls can run for minutes, so they answer as SSE when the client takes it: headers go out at once. */
+function streams(req: Request, messages: unknown[]): boolean {
+  if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return false;
+  return messages.some(
+    (m) =>
+      (m as { method?: unknown; id?: unknown })?.method === "tools/call" &&
+      (m as { id?: unknown }).id !== undefined,
+  );
+}
+
+/** Comment lines keep idle timeouts (Bun.serve closes a quiet connection after 10s) from closing the stream. */
+export const SSE_KEEPALIVE_MS = 5_000;
+
+function sse(replies: Promise<unknown[]>, signal: AbortSignal): Response {
+  const enc = new TextEncoder();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const write = (s: string) => {
+        try {
+          controller.enqueue(enc.encode(s));
+        } catch {
+          clearInterval(timer);
+        }
+      };
+      write(": open\n\n");
+      timer = setInterval(() => write(": keepalive\n\n"), SSE_KEEPALIVE_MS);
+      signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+      void replies.then(
+        (list) => {
+          clearInterval(timer);
+          for (const reply of list) write(`event: message\ndata: ${JSON.stringify(reply)}\n\n`);
+          try {
+            controller.close();
+          } catch {}
+        },
+        (error: unknown) => {
+          clearInterval(timer);
+          controller.error(error);
+        },
+      );
+    },
+    cancel() {
+      clearInterval(timer);
+    },
+  });
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+  });
 }
 
 function authorized(token: string, header: string | null): boolean {
