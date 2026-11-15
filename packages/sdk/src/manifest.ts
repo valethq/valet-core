@@ -7,6 +7,8 @@ export interface PluginManifest {
   name: string;
   version: string; // semver
   description?: string;
+  /** Where the plugin's source lives, e.g. "https://github.com/valethq/valet-exec". Shown next to its part types. */
+  repository?: string;
   /** Semver range of the core plugin API this targets, e.g. "^0.1.0". */
   valet: string;
   /** Entry module, relative to the manifest. Bun loads .ts directly. */

@@ -10,6 +10,7 @@ import {
   type Message,
   type Part,
   type PartData,
+  type PartTypes,
   type PartWriter,
   type Principal,
   type Project,
@@ -23,6 +24,7 @@ import {
 } from "@valethq/sdk";
 import type { CoreBus } from "../bus/types";
 import { newId } from "./ids";
+import type { PartTypeRegistry, PluginOrigin } from "./parttypes";
 import { rowToMessage, rowToPart, rowToPrincipal, rowToProject, rowToRun, rowToSession } from "./rows";
 
 type EvName = Extract<keyof ValetEvents, string>;
@@ -37,6 +39,9 @@ export interface StoreDeps {
   logger: Logger;
   /** In-memory data of parts with an open writer; reads overlay it on the checkpointed row. */
   liveParts: Map<string, PartData>;
+  partTypes: PartTypeRegistry;
+  /** Manifest facts of loaded plugins, recorded with the part types they define. */
+  origins: Map<string, PluginOrigin>;
 }
 
 function denialError(denial: Denial): ServiceDeniedError {
@@ -400,6 +405,7 @@ export class StoreView implements Store {
       meta?: Record<string, unknown>;
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult> => {
+      for (const data of m.parts) this.#deps.partTypes.check(data, this.#caller.plugin);
       const now = Date.now();
       const seqRow = this.#deps.db
         .query<{ seq: number }, string>(
@@ -460,6 +466,7 @@ export class StoreView implements Store {
     },
 
     openPart: (messageId: string, data: PartData): PartWriter => {
+      this.#deps.partTypes.check(data, this.#caller.plugin);
       const row = this.#deps.db
         .query<{ session_id: string }, string>("SELECT session_id FROM messages WHERE id = ?")
         .get(messageId);
@@ -708,6 +715,20 @@ export class StoreView implements Store {
     },
   };
 
+  // ---- part types (9.4) ----------------------------------------------------
+
+  // spec-gap: defining a part type emits no event; it is plugin bookkeeping like a migration.
+  readonly partTypes: PartTypes = {
+    define: (def) => {
+      const plugin = this.#caller.plugin;
+      if (plugin === "core") throw new Error("only plugins define part types");
+      const origin = this.#deps.origins.get(plugin) ?? { id: plugin, version: "0.0.0" };
+      return this.#deps.partTypes.define(origin, def);
+    },
+    get: (id) => this.#deps.partTypes.get(id),
+    list: () => this.#deps.partTypes.list(),
+  };
+
   // ---- blobs ---------------------------------------------------------------
 
   // spec-gap: blobs have no action event in 7.3; writes go straight to disk + row.
@@ -796,6 +817,7 @@ class DbPartWriter implements PartWriter {
 
   replace(data: PartData): void {
     if (this.#closed) throw new Error(`part "${this.partId}" is closed`);
+    this.#deps.partTypes.check(data, this.#caller.plugin);
     this.#data = data;
     this.#deps.liveParts.set(this.partId, this.#data);
     this.#flush();
@@ -804,6 +826,7 @@ class DbPartWriter implements PartWriter {
 
   close(status: "complete" | "error" | "interrupted", final?: PartData): void {
     if (this.#closed) return;
+    if (final !== undefined) this.#deps.partTypes.check(final, this.#caller.plugin);
     if (final !== undefined) this.#data = final;
     this.#closed = true;
     this.#deps.liveParts.delete(this.partId);

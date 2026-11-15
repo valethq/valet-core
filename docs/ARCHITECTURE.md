@@ -781,7 +781,7 @@ Project (workspace dir, persona, default model)
  └─ Session (title, color, model + fallbacks, bindings, provider_state)
      ├─ Run (one agent turn; queued → running → complete|cancelled|error|interrupted)
      └─ Message (seq, role, author, status, origin)
-         └─ Part[] (text | reasoning | tool-call | file | notice | compaction)
+         └─ Part[] (text | reasoning | tool-call | file | notice | compaction | custom)
 ```
 
 - **Personas are files in the project's workspace dir** (`AGENTS.md`, `SOUL.md`, and so on). Project settings choose which files load and in what order. There is no persona table, so the agent can edit its own persona with its fs tools, as Helper does today.
@@ -799,7 +799,8 @@ export type PartData =
       output?: string; result?: ToolResult; status: "pending" | "running" | "done" | "error" | "cancelled" | "denied" }
   | { type: "file"; blobId: string; name: string; mime: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }   // "turn interrupted by restart", "exec job 12 finished"
-  | { type: "compaction"; by: string; status: "in_progress" | "completed" | "failed" | "cancelled"; coversThroughSeq: number; summary?: string; error?: string };  // by "valet" or a harness label; only a completed valet compaction with a summary changes valet's history
+  | { type: "compaction"; by: string; status: "in_progress" | "completed" | "failed" | "cancelled"; coversThroughSeq: number; summary?: string; error?: string }  // by "valet" or a harness label; only a completed valet compaction with a summary changes valet's history
+  | { type: "custom"; kind: string; title: string; text: string; data: unknown };  // kind: a registered part type id (9.4)
 ```
 
 A tool call and its result are one part that updates in place. That's what the "tool stepping" UI renders, and it also keeps the call and its result together when the context is rebuilt. `ModelMessage`s are derived from parts by ContextManager and are never stored.
@@ -813,6 +814,38 @@ A tool call and its result are one part that updates in place. That's what the "
 5. `message.complete` and `run.end`. If `context.shouldCompact()` returns true, compaction runs before the next run.
 
 For an `agent` provider (Devin), step 3 opens or reopens an `AgentSession` from `provider_state`. On first open it sends `context.preamble()`, then maps `AgentEvent`s onto the same parts. Step 4 happens inside Devin. Calls to valet's MCP tools still pass through `tool.call`, and Devin's built-in tools appear as tool-call parts mirrored from ACP.
+
+### 9.4 Plugin-defined part types
+
+The built-in part types are fixed. Anything else is a `custom` part whose `kind` names an entry in core's part type registry, so a plugin can add a part (a job-end notification, say) without a core change.
+
+```ts
+export interface PartTypeDefinition {
+  id: string;                        // "<plugin id>/<name>@<major>", e.g. "valet-exec/job-end@1"
+  description?: string;
+  schema: Record<string, unknown>;   // JSON schema (core's validator subset) for `data`
+  view?: PartTypeView;               // rendering hints for clients without a renderer for this id
+  wakes?: boolean;                   // a `system` message holding this part starts a run, like a user message
+}
+export interface PartTypeView { collapsed?: boolean; level?: "info" | "warn" | "error"; icon?: string; fields?: string[] }
+export interface PartType extends PartTypeDefinition {
+  plugin: { id: string; version: string; repository?: string };   // from the defining plugin's manifest
+  definedAt: number;
+  updatedAt: number;
+}
+export interface PartTypes {
+  define(def: PartTypeDefinition): PartType;
+  get(id: string): PartType | undefined;
+  list(): PartType[];
+}
+```
+
+- **Registry.** Core keeps every definition in `<valetHome>/part-types.json`, one JSON array, and serves it at `GET /api/core/part-types`. A plugin calls `store.partTypes.define()` on every activate, and core merges by id. Entries are never removed: when a plugin is uninstalled its parts stay readable, and reinstalling it picks the same entry back up.
+- **Ownership.** An id must start with the defining plugin's id, and only that plugin may write parts of that kind. Core rejects a part whose `kind` is unknown or whose `data` fails the schema, on `messages.create`, `openPart`, `replace` and `close`.
+- **Versions.** A published `id@major` never changes its schema: defining it again with another schema throws. Other fields (description, view, wakes, origin) may change. A breaking change is a new major; old majors stay in the registry and old parts keep their kind.
+- **Two sides.** `title` is the collapsed header people see; `text` is what the model sees. Both are written with the part and never recomputed, so a plugin update can't rewrite history (or a prompt cache), and a client or ContextManager that doesn't know the kind can still show it.
+- **Rendering.** A client renders kinds it knows its own way, keyed by id and major. For anything else it shows a collapsed block with `title`, expanding to `text`, the kind and its origin (plugin, version, repository, and whether it is loaded), with raw `data` behind a second expander. `view` hints refine that block. Custom parts take `replace()`, not deltas.
+- **Messages.** A message of a custom type is a message holding one custom part. A `system` message holding a part whose type `wakes` is a notification: valet-agent runs on it under its author's role. Only plugins can post one, since a control-plane caller owns no part types.
 
 ## 10. HTTP and WebSocket host (control plane)
 
@@ -954,7 +987,7 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
 - **Job directory.** Each job writes into `~/.valet/data/valet-exec/jobs/<id>/`: `cmd`, `out.log` (stdout and stderr together), `exit` and `pid`. The `p_exec_jobs` table indexes them, linked to `sessionId`, `runId` and `callId`.
 - **Streaming.** The plugin tails `out.log` from a stored offset. Output goes out as an `exec.output` signal, as WS topic `exec:<id>` and as `ToolCall.progress()` while the originating call is still waiting.
 - **Re-attach at boot.** On activate, the plugin scans for running jobs (checking `systemctl --user is-active` or the pid), resumes tailing them, and finalizes jobs that ended while valet was down.
-- **Completion notices.** When a background job ends, the plugin emits `exec.job.end`. `valet-agent` turns that into a `notice` part in the session ("job 12 exited 0 after 41m") and, if `settings.agent.wakeOnJobEnd` is set, a new run. This replaces OpenClaw's exec-completion polling.
+- **Completion notifications.** When a background job ends, the plugin emits `exec.job.end` and posts a `system` message holding a `valet-exec/job-end@1` part (9.4), whose type `wakes`: people see "Process finished", the model sees the status and the tail of the log, and an idle session starts a run. This replaces OpenClaw's exec-completion polling.
 - **Interrupt.** `kill` (or a run cancel that covers a foreground job) sends SIGTERM to the process group or `systemctl --user stop`, then SIGKILL after 5s.
 - **Output caps.** A tool result returns the first 2 KB and last 30 KB plus the log path, so `process log` can page the rest. Logs are kept for 14 days.
 - **Role.** `minRole: "owner"`. Friends never get a shell (decision 5).

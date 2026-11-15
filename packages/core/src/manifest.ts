@@ -70,6 +70,9 @@ export function validateManifest(manifest: unknown): string[] {
   } else if (m.main.startsWith("/") || m.main.split("/").includes("..")) {
     errors.push(`main must be a relative path inside the plugin dir, got ${JSON.stringify(m.main)}`);
   }
+  if (m.repository !== undefined && typeof m.repository !== "string") {
+    errors.push("repository must be a string");
+  }
   if (m.description !== undefined && typeof m.description !== "string") {
     errors.push("description must be a string");
   }

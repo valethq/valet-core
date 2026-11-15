@@ -1,4 +1,5 @@
 import type { Denial } from "./events";
+import type { PartTypes } from "./parttypes";
 import type { ChannelBinding } from "./platform";
 import type { Role, ToolResult } from "./tools";
 
@@ -94,7 +95,9 @@ export type PartData =
       coversThroughSeq: number;
       summary?: string;
       error?: string;
-    };
+    }
+  // kind: a registered part type id (9.4). title is the collapsed header, text what the model sees.
+  | { type: "custom"; kind: string; title: string; text: string; data: unknown };
 
 export type CancelledResult = { cancelled: true; cancelReason?: string; denied?: Denial };
 export interface ActorRef {
@@ -169,6 +172,8 @@ export interface Store {
     link(principalId: string, platform: string, externalId: string): Promise<void>;
     setRole(principalId: string, role: Role): Promise<void>;
   };
+  /** Plugin-defined part types (9.4). */
+  partTypes: PartTypes;
   blobs: {
     put(bytes: Uint8Array | Blob, meta: { mime?: string; name?: string }): Promise<{ id: string }>;
     path(id: string): string;

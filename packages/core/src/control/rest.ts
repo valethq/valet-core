@@ -254,6 +254,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     }),
 
     r("GET", "/plugins", async () => json(deps.plugins())),
+    r("GET", "/part-types", async (_req, _ctx, store) => json(store.partTypes.list())),
     r("POST", "/config/reload", async () => {
       const result = await deps.reload();
       return json(result, result.ok ? 200 : 400);

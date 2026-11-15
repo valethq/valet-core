@@ -4,12 +4,14 @@ import type { CoreBus } from "../bus/types";
 import { defaultDbPath, openDatabase } from "./engine";
 import { runCoreMigrations } from "./migrate";
 import { createPluginStorage } from "./storage";
+import { PartTypeRegistry, type PluginOrigin } from "./parttypes";
 import { createStore, type CoreStore, type StoreDeps } from "./store";
 
 export { defaultDbPath, hasFts5, openDatabase } from "./engine";
 export { newId } from "./ids";
 export { ensureMigrationsTable, migrationApplied, recordMigration, runCoreMigrations } from "./migrate";
 export { createPluginStorage } from "./storage";
+export { PartTypeRegistry, type PluginOrigin } from "./parttypes";
 export { createStore, StoreView } from "./store";
 export type { CoreStore, StoreDeps } from "./store";
 
@@ -23,6 +25,9 @@ export interface OpenStoreOptions {
 
 export interface OpenedStore extends CoreStore {
   pluginStorage(pluginId: string): PluginStorage;
+  readonly partTypes: PartTypeRegistry;
+  /** Records a loaded plugin's manifest facts for the part types it defines. */
+  setOrigin(origin: PluginOrigin): void;
 }
 
 /** Opens the database, applies core migrations and returns the single core store. */
@@ -35,6 +40,15 @@ export async function openStore(opts: OpenStoreOptions): Promise<OpenedStore> {
     blobsDir: join(opts.valetHome, "blobs"),
     logger: opts.logger ?? console,
     liveParts: new Map(),
+    partTypes: new PartTypeRegistry(
+      opts.dbPath === ":memory:" ? null : join(opts.valetHome, "part-types.json"),
+    ),
+    origins: new Map(),
   };
-  return { ...createStore(deps), pluginStorage: (pluginId) => createPluginStorage(db, pluginId) };
+  return {
+    ...createStore(deps),
+    pluginStorage: (pluginId) => createPluginStorage(db, pluginId),
+    partTypes: deps.partTypes,
+    setOrigin: (origin) => deps.origins.set(origin.id, origin),
+  };
 }
