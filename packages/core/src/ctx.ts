@@ -47,6 +47,11 @@ export function buildPluginContext(
   ) => void | Promise<void>)[] = [];
   let current = config;
 
+  deps.store.setOrigin({
+    id: plugin.id,
+    version: plugin.version,
+    ...(plugin.manifest.repository ? { repository: plugin.manifest.repository } : {}),
+  });
   const data = join(deps.valetHome, "data", plugin.id);
   const cache = join(deps.valetHome, "cache", plugin.id);
   mkdirSync(data, { recursive: true });

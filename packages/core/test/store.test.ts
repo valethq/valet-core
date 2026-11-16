@@ -154,6 +154,11 @@ describe("messages", () => {
     expect(view.messages.list(session.id, { beforeSeq: 2 })).toHaveLength(1);
     expect(view.messages.list(session.id, { limit: 1 })[0]?.message.seq).toBe(2);
     expect(view.sessions.get(session.id)?.lastMessageAt).not.toBeNull();
+    // only the assistant message counts as a response
+    expect(view.sessions.get(session.id)?.lastResponseAt).toBe(second.message.createdAt);
+    const after = await view.messages.create({ sessionId: session.id, role: "user", parts: [] });
+    if (isCancelled(after)) throw new Error("cancelled");
+    expect(view.sessions.get(session.id)?.lastResponseAt).toBe(second.message.createdAt);
   });
 
   test("message.create defaults caller.actor to the author principal", async () => {
