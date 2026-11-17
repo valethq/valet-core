@@ -69,6 +69,27 @@ describe("projects", () => {
     expect(view.projects.get(project.id)?.name).toBe("renamed");
   });
 
+  test("update relocates the workspace dir", async () => {
+    const project = await makeProject();
+    const moved = await view.projects.update(project.id, { workspaceDir: "/tmp/elsewhere" });
+    if (isCancelled(moved)) throw new Error("update cancelled");
+    expect(moved.workspaceDir).toBe("/tmp/elsewhere");
+    expect(view.projects.get(project.id)?.workspaceDir).toBe("/tmp/elsewhere");
+  });
+
+  test("delete unregisters an empty project and refuses one with sessions", async () => {
+    const empty = await makeProject();
+    const seen = watch("project.delete");
+    await view.projects.delete(empty.id);
+    expect(view.projects.get(empty.id)).toBeUndefined();
+    expect(seen.payloads[0]?.project.id).toBe(empty.id);
+
+    const busy = await makeProject();
+    await makeSession(busy.id);
+    await expect(view.projects.delete(busy.id)).rejects.toThrow(/still has 1 session/);
+    expect(view.projects.get(busy.id)).toBeDefined();
+  });
+
   test("emits project.create with the plugin's stamped caller", async () => {
     const seen = watch("project.create");
     await makeProject();

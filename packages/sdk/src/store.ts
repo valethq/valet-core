@@ -115,10 +115,13 @@ export interface Store {
     create(
       p: Pick<Project, "name" | "workspaceDir"> & { settings?: Project["settings"] },
     ): Promise<Project | CancelledResult>;
+    // spec-gap: workspaceDir is patchable (relocate) and delete exists; the doc's Store lists neither.
     update(
       id: string,
-      patch: Partial<Pick<Project, "name" | "settings">>,
+      patch: Partial<Pick<Project, "name" | "workspaceDir" | "settings">>,
     ): Promise<Project | CancelledResult>;
+    /** Unregisters the project; refuses while it still has sessions. Never touches the directory. */
+    delete(id: string): Promise<Project | CancelledResult>;
   };
   sessions: {
     get(id: string): Session | undefined;

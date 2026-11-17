@@ -57,7 +57,8 @@ const post = (base: string, path: string, body: unknown, headers: Record<string,
   fetch(`${base}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
 
 async function createProject(base: string): Promise<{ id: string }> {
-  const res = await post(base, "/api/core/projects", { name: "p", workspaceDir: "/tmp/w" });
+  const workspaceDir = mkdtempSync(join(tmpdir(), "valet-ws-"));
+  const res = await post(base, "/api/core/projects", { name: "p", workspaceDir });
   expect(res.status).toBe(201);
   return (await res.json()) as { id: string };
 }
@@ -242,6 +243,77 @@ describe("identity + core REST", () => {
     const res = await fetch(`${env.base}/api/core/projects`, { headers: AUTH });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("denied");
+  });
+});
+
+describe("project registration and folder browsing", () => {
+  const patch = (base: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method: "PATCH", headers: JSON_POST, body: JSON.stringify(body) });
+
+  test("create validates the path, defaults the name and refuses duplicates; relocate and delete work", async () => {
+    const env = await up({
+      fixtures: ["auth"],
+      plugins: {
+        "valet-fixture-auth": {
+          config: { token: "tok", externalId: "owner", displayName: "Owner", role: "owner" },
+        },
+      },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "valet-reg-"));
+
+    expect((await post(env.base, "/api/core/projects", { workspaceDir: "relative" })).status).toBe(400);
+    expect((await post(env.base, "/api/core/projects", { workspaceDir: join(dir, "nope") })).status).toBe(
+      404,
+    );
+
+    const created = await post(env.base, "/api/core/projects", { workspaceDir: `${dir}/` });
+    expect(created.status).toBe(201);
+    const project = (await created.json()) as { id: string; name: string; workspaceDir: string };
+    expect(project.name).toBe(dir.split("/").pop() as string);
+    expect(project.workspaceDir).not.toEndWith("/");
+
+    expect((await post(env.base, "/api/core/projects", { workspaceDir: dir })).status).toBe(409);
+
+    const other = mkdtempSync(join(tmpdir(), "valet-reg-"));
+    const moved = await patch(env.base, `/api/core/projects/${project.id}`, { workspaceDir: other });
+    expect(moved.status).toBe(200);
+    expect(((await moved.json()) as { workspaceDir: string }).workspaceDir).toBe(other);
+
+    const session = await createSession(env.base, project.id);
+    expect(
+      (await fetch(`${env.base}/api/core/projects/${project.id}`, { method: "DELETE", headers: AUTH }))
+        .status,
+    ).toBe(409);
+    await fetch(`${env.base}/api/core/sessions/${session.id}`, { method: "DELETE", headers: AUTH });
+    expect(
+      (await fetch(`${env.base}/api/core/projects/${project.id}`, { method: "DELETE", headers: AUTH }))
+        .status,
+    ).toBe(200);
+    expect((await fetch(`${env.base}/api/core/projects/${project.id}`, { headers: AUTH })).status).toBe(404);
+  });
+
+  test("fs list and mkdir", async () => {
+    const env = await up({
+      fixtures: ["auth"],
+      plugins: {
+        "valet-fixture-auth": {
+          config: { token: "tok", externalId: "owner", displayName: "Owner", role: "owner" },
+        },
+      },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "valet-fs-"));
+    const made = await post(env.base, "/api/core/fs/mkdir", { parent: dir, name: "new" });
+    expect(made.status).toBe(201);
+    expect((await post(env.base, "/api/core/fs/mkdir", { parent: dir, name: "new" })).status).toBe(409);
+    expect((await post(env.base, "/api/core/fs/mkdir", { parent: dir, name: "../x" })).status).toBe(400);
+    const listed = await fetch(`${env.base}/api/core/fs/list?path=${encodeURIComponent(dir)}`, {
+      headers: AUTH,
+    });
+    const body = (await listed.json()) as { dirs: { name: string }[] };
+    expect(body.dirs.map((d) => d.name)).toEqual(["new"]);
+    expect(
+      (await fetch(`${env.base}/api/core/fs/list?path=/definitely/not/here`, { headers: AUTH })).status,
+    ).toBe(404);
   });
 });
 

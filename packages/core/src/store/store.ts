@@ -63,6 +63,15 @@ function cancelledResult(cancelReason: string | undefined, denied: Denial | unde
 }
 
 /** The Store view one caller sees; mutating actions emit the matching 7.3 core event. */
+export class ProjectInUseError extends Error {
+  constructor(
+    readonly projectId: string,
+    readonly sessions: number,
+  ) {
+    super(`project "${projectId}" still has ${sessions} session(s); move or delete them first`);
+  }
+}
+
 export class StoreView implements Store {
   readonly #deps: StoreDeps;
   readonly #caller: Caller;
@@ -193,21 +202,39 @@ export class StoreView implements Store {
 
     update: async (
       id: string,
-      patch: Partial<Pick<Project, "name" | "settings">>,
+      patch: Partial<Pick<Project, "name" | "workspaceDir" | "settings">>,
     ): Promise<Project | CancelledResult> => {
       const current = this.projects.get(id);
       if (!current) throw new Error(`unknown project "${id}"`);
       const project: Project = {
         ...current,
         name: patch.name ?? current.name,
+        workspaceDir: patch.workspaceDir ?? current.workspaceDir,
         settings: patch.settings ?? current.settings,
         updatedAt: Date.now(),
       };
       return this.#action(this.#caller, "project.update", { project }, ({ project: final }) =>
         this.#deps.db.transaction(() => {
           this.#deps.db
-            .query("UPDATE projects SET name = ?, settings = ?, updated_at = ? WHERE id = ?")
-            .run(final.name, JSON.stringify(final.settings), final.updatedAt, final.id);
+            .query(
+              "UPDATE projects SET name = ?, workspace_dir = ?, settings = ?, updated_at = ? WHERE id = ?",
+            )
+            .run(final.name, final.workspaceDir, JSON.stringify(final.settings), final.updatedAt, final.id);
+          return final;
+        })(),
+      );
+    },
+
+    delete: async (id: string): Promise<Project | CancelledResult> => {
+      const project = this.projects.get(id);
+      if (!project) throw new Error(`unknown project "${id}"`);
+      return this.#action(this.#caller, "project.delete", { project }, ({ project: final }) =>
+        this.#deps.db.transaction(() => {
+          const row = this.#deps.db
+            .query("SELECT COUNT(*) AS n FROM sessions WHERE project_id = ?")
+            .get(final.id) as { n: number };
+          if (row.n > 0) throw new ProjectInUseError(final.id, row.n);
+          this.#deps.db.query("DELETE FROM projects WHERE id = ?").run(final.id);
           return final;
         })(),
       );

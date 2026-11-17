@@ -7,6 +7,8 @@ declare module "./events" {
   interface ValetEvents {
     "project.create": { project: Project };
     "project.update": { project: Project };
+    // spec-gap: project.delete is not in the architecture doc's event catalog.
+    "project.delete": { project: Project };
     "session.create": { session: Session };
     "session.update": {
       session: Session;

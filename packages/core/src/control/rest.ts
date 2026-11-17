@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import {
   type Caller,
   type CancelledResult,
@@ -8,6 +9,8 @@ import {
   type Store,
 } from "@valethq/sdk";
 import type { PluginStatus, ReloadResult } from "../kernel";
+import { ProjectInUseError } from "../store/store";
+import { FsError, listDirs, makeDir, normalizeDir } from "./fs";
 import { matchSegments, splitPath } from "./router";
 
 export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -54,6 +57,15 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
     if (error instanceof ServiceDeniedError) {
       return deniedJson({ by: error.by, reason: error.reason || error.message });
     }
+    if (error instanceof FsError) {
+      return errorJson(
+        error.code === "not_found" ? 404 : error.code === "conflict" ? 409 : 400,
+        error.code,
+        error.message,
+      );
+    }
+    if (error instanceof ProjectInUseError)
+      return errorJson(409, "in_use", error.message, { sessions: error.sessions });
     const message = error instanceof Error ? error.message : String(error);
     if (/^unknown /.test(message)) return errorJson(404, "not_found", message);
     if (error instanceof SyntaxError) return errorJson(400, "bad_request", "invalid JSON body");
@@ -103,13 +115,18 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("GET", "/projects", async (_req, _ctx, store) => json(store.projects.list())),
     r("POST", "/projects", async (req, _ctx, store) => {
       const b = await body(req);
-      if (typeof b.name !== "string" || typeof b.workspaceDir !== "string") {
-        return errorJson(400, "bad_request", "name and workspaceDir are required strings");
+      if (typeof b.workspaceDir !== "string" || (b.name !== undefined && typeof b.name !== "string")) {
+        return errorJson(400, "bad_request", "workspaceDir is required; name must be a string");
       }
+      const workspaceDir = await normalizeDir(b.workspaceDir);
+      const taken = store.projects.list().find((p) => p.workspaceDir === workspaceDir);
+      if (taken)
+        return errorJson(409, "conflict", `already registered as "${taken.name}"`, { projectId: taken.id });
+      const name = (b.name as string | undefined)?.trim() || basename(workspaceDir);
       return result(
         await store.projects.create({
-          name: b.name,
-          workspaceDir: b.workspaceDir,
+          name,
+          workspaceDir,
           ...(b.settings === undefined ? {} : { settings: b.settings as Record<string, unknown> }),
         }),
         201,
@@ -122,10 +139,32 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("PATCH", "/projects/:id", async (req, ctx, store) => {
       if (!store.projects.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown project");
       const b = await body(req);
-      const patch: { name?: string; settings?: Record<string, unknown> } = {};
+      const patch: { name?: string; workspaceDir?: string; settings?: Record<string, unknown> } = {};
       if (b.name !== undefined) patch.name = String(b.name);
+      if (b.workspaceDir !== undefined) {
+        const dir = await normalizeDir(String(b.workspaceDir));
+        const taken = store.projects.list().find((p) => p.workspaceDir === dir && p.id !== ctx.params.id);
+        if (taken)
+          return errorJson(409, "conflict", `already registered as "${taken.name}"`, { projectId: taken.id });
+        patch.workspaceDir = dir;
+      }
       if (b.settings !== undefined) patch.settings = b.settings as Record<string, unknown>;
       return result(await store.projects.update(ctx.params.id as string, patch));
+    }),
+    r("DELETE", "/projects/:id", async (_req, ctx, store) => {
+      if (!store.projects.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown project");
+      return result(await store.projects.delete(ctx.params.id as string));
+    }),
+    r("GET", "/fs/list", async (req) => {
+      const q = new URL(req.url).searchParams;
+      return json(await listDirs(q.get("path"), q.get("hidden") === "1"));
+    }),
+    r("POST", "/fs/mkdir", async (req) => {
+      const b = await body(req);
+      if (typeof b.parent !== "string" || typeof b.name !== "string") {
+        return errorJson(400, "bad_request", "parent and name are required strings");
+      }
+      return json({ path: await makeDir(b.parent, b.name) }, 201);
     }),
 
     r("GET", "/sessions", async (req, _ctx, store) => {
