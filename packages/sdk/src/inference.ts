@@ -15,6 +15,9 @@ export type InferenceProvider = ModelProvider | AgentProvider;
 interface ProviderBase {
   readonly id: string; // "devin-cli"; also the scope key
   readonly label: string;
+  // spec-gap: 6.1 has no provider icon; a logo key like PartTypeView.icon, mapped by each UI to its own marks.
+  /** Logo key for UIs, e.g. "cursor" or "claude". A UI shows nothing for a key it does not know. */
+  readonly icon?: string;
   listModels(): Promise<ModelInfo[]>;
   /** The provider's Utility model: a cheap, fast model for small side jobs such as naming a session. */
   readonly utility?: UtilityModel;
