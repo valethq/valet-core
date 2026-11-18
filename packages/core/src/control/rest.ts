@@ -8,7 +8,9 @@ import {
   type Session,
   type Store,
 } from "@valethq/sdk";
-import type { PluginStatus, ReloadResult } from "../kernel";
+import { type PluginSettings, type PluginStatus, type ReloadResult, SettingsError } from "../kernel";
+import { deleteSecret, isSecretName, listSecretFiles, secretSource, writeSecret } from "../secrets";
+import type { SettingsPatch } from "../settings";
 import { ProjectInUseError } from "../store/store";
 import { FsError, listDirs, makeDir, normalizeDir } from "./fs";
 import { matchSegments, splitPath } from "./router";
@@ -64,6 +66,8 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
         error.message,
       );
     }
+    if (error instanceof SettingsError)
+      return errorJson(error.status, error.status === 404 ? "not_found" : "bad_request", error.message);
     if (error instanceof ProjectInUseError)
       return errorJson(409, "in_use", error.message, { sessions: error.sessions });
     const message = error instanceof Error ? error.message : String(error);
@@ -99,6 +103,11 @@ const num = (v: string | null): number | undefined => (v === null ? undefined : 
 export interface RestDeps {
   plugins(): PluginStatus[];
   reload(): Promise<ReloadResult>;
+  settings(): PluginSettings[];
+  updateSettings(plugin: string, patch: SettingsPatch): Promise<PluginSettings>;
+  /** Tells plugins a secret was written or removed (the name only). */
+  secretChanged(name: string): void;
+  valetHome: string;
   /** Raw db handle for blob metadata (the Store API exposes only put/path). */
   blobMeta(id: string): { sha256: string; mime: string | null; name: string | null } | undefined;
   blobPath(id: string): string;
@@ -297,6 +306,50 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("POST", "/config/reload", async () => {
       const result = await deps.reload();
       return json(result, result.ok ? 200 : 400);
+    }),
+
+    r("GET", "/settings", async () => json(deps.settings())),
+    r("GET", "/settings/:plugin", async (_req, ctx) => {
+      const found = deps.settings().find((p) => p.plugin === ctx.params.plugin);
+      return found ? json(found) : errorJson(404, "not_found", "unknown plugin");
+    }),
+    r("PATCH", "/settings/:plugin", async (req, ctx) => {
+      const b = await body(req);
+      const config = b.config;
+      if (config !== undefined && (typeof config !== "object" || config === null || Array.isArray(config)))
+        return errorJson(400, "bad_request", "config must be an object");
+      if (b.enabled !== undefined && typeof b.enabled !== "boolean")
+        return errorJson(400, "bad_request", "enabled must be a boolean");
+      const patch: SettingsPatch = {
+        ...(config === undefined ? {} : { config: config as Record<string, unknown> }),
+        ...(b.enabled === undefined ? {} : { enabled: b.enabled as boolean }),
+      };
+      return json(await deps.updateSettings(ctx.params.plugin as string, patch));
+    }),
+
+    r("GET", "/secrets", async () =>
+      json(listSecretFiles(deps.valetHome).map((name) => ({ name, source: "file" }))),
+    ),
+    r("GET", "/secrets/:name", async (_req, ctx) => {
+      const name = ctx.params.name as string;
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      return json({ name, source: secretSource(deps.valetHome, name) });
+    }),
+    r("PUT", "/secrets/:name", async (req, ctx) => {
+      const name = ctx.params.name as string;
+      const b = await body(req);
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      if (typeof b.value !== "string" || b.value.trim() === "")
+        return errorJson(400, "bad_request", "value must be a non-empty string");
+      writeSecret(deps.valetHome, name, b.value.trim());
+      deps.secretChanged(name);
+      return json({ name, source: "file" });
+    }),
+    r("DELETE", "/secrets/:name", async (_req, ctx) => {
+      const name = ctx.params.name as string;
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      if (deleteSecret(deps.valetHome, name)) deps.secretChanged(name);
+      return json({ name, source: secretSource(deps.valetHome, name) });
     }),
 
     r("GET", "/blobs/:id", async (_req, ctx) => {

@@ -1,4 +1,53 @@
-// spec-gap: the `settings` scope is defined by valet-ui and not in the architecture doc; every provider used to redeclare this type.
+/**
+ * Settings (12.1). A plugin's settings are its config: the manifest's `configSchema` describes them, core stores
+ * what a UI saves, and `ctx.config` always holds the effective values. The `settings` scope below is for what
+ * config can't express: live view blocks, actions, and forms whose values are not config (a password change).
+ */
+
+/**
+ * UI hints a settings schema may carry next to standard JSON Schema (title, description, default, enum,
+ * minimum, maximum, readOnly, format "password"). Core ignores them; a UI uses the ones it knows.
+ */
+export interface SettingsSchemaHints {
+  /** Labels for `enum` values, in the same order. */
+  enumNames?: string[];
+  /**
+   * A control richer than the type implies. Known to valet-ui: "textarea", "secret" (the value names a secret
+   * the UI can set), "model" (a ModelRef), "models" (valet-agent's model catalog), "segmented".
+   */
+  "x-widget"?: string;
+  /** Kept in the page's collapsed Advanced section. */
+  "x-advanced"?: boolean;
+  /** A heading the field is grouped under on its page. */
+  "x-section"?: string;
+  /** Top-level properties only: show the field on another of the plugin's pages (an `x-pages` id). */
+  "x-page"?: string;
+}
+
+/** Group a settings page is listed under. */
+export type SettingsGroup = "models" | "providers" | "tools" | "system";
+
+export interface SettingsPageInfo {
+  title: string;
+  description?: string;
+  group?: SettingsGroup;
+  /** An icon name; UIs map the ones they know. */
+  icon?: string;
+  /** Sort key within its group; lower first. */
+  order?: number;
+}
+
+/**
+ * Hints on the root of a configSchema. Without `x-group` a UI derives one from the manifest's `provides`:
+ * inference providers under "providers", tool-only plugins under "tools", the rest under "system".
+ */
+export interface SettingsRootHints {
+  "x-group"?: SettingsGroup;
+  "x-icon"?: string;
+  "x-order"?: number;
+  /** Extra pages the plugin's settings split into, by id. */
+  "x-pages"?: Record<string, SettingsPageInfo>;
+}
 
 export type SettingsTone = "normal" | "good" | "warning" | "critical";
 
@@ -37,10 +86,15 @@ export type SettingsBlock =
 
 export type SettingsAction = (args: Record<string, unknown>) => void | Promise<void>;
 
-/** A panel on the `settings` scope: an editable form (`schema`, `get`, `set`), read-only `view` blocks, or both. The blocks render above the form. */
+/**
+ * A panel on the `settings` scope: read-only `view` blocks, actions, an editable form (`schema`, `get`, `set`)
+ * for values that are not config, or a mix. It shows on its plugin's settings page, above the config form.
+ */
 export interface SettingsPanel {
   title: string;
   description?: string;
+  /** One of the plugin's `x-pages` ids to show on instead of its main page. */
+  page?: string;
   /** JSON Schema describing the editable values; the UI renders its form from it. */
   schema?: Record<string, unknown>;
   get?(): Record<string, unknown> | Promise<Record<string, unknown>>;

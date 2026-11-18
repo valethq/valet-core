@@ -10,6 +10,17 @@ import { type HttpRegistry, type WsRegistry, createHttpRegistry, createWsRegistr
 import { type PluginRecord, discoverPlugins, resolvePlugins, unmetAtActivation } from "./loader";
 import { type CoreLogger, createLogger } from "./log";
 import { CORE_SCOPE_DEFS, type CoreScopes, createScopeRegistry } from "./scopes";
+import {
+  layer,
+  loadOverlay,
+  patchOverlay,
+  type SettingSource,
+  type SettingsOverlay,
+  type SettingsPatch,
+  saveOverlay,
+  sourcesOf,
+  withDefaults,
+} from "./settings";
 import { type OpenedStore, openStore } from "./store";
 
 const ACTIVATION_TIMEOUT_MS = 15_000;
@@ -25,6 +36,33 @@ export interface PluginStatus {
   order?: number;
   /** Set when a reload changed this plugin's config in a way it can only apply after a restart. */
   restartRequired?: string;
+}
+
+/** One plugin's settings as the control plane serves them (12.1). */
+export interface PluginSettings {
+  plugin: string;
+  name?: string;
+  description?: string;
+  version?: string;
+  provides: string[];
+  state: PluginStatus["state"] | "pending";
+  enabled: boolean;
+  /** The manifest's configSchema: the form a UI renders. */
+  schema?: Record<string, unknown>;
+  /** The effective config: schema defaults, then the config file, then saved settings. */
+  values: Record<string, unknown>;
+  sources: Record<string, SettingSource>;
+  restartRequired?: string;
+}
+
+export class SettingsError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 422,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SettingsError";
+  }
 }
 
 export interface ReloadResult {
@@ -65,6 +103,13 @@ export interface ValetKernel {
   plugins(): PluginStatus[];
   /** spec-gap: re-reads the config file, validates it, and applies what can change live; rejects the whole reload on any error. */
   reload(): Promise<ReloadResult>;
+  /** Every discovered plugin's settings (12.1). */
+  settings(): PluginSettings[];
+  /**
+   * Saves a plugin's settings to settings.json and applies them live. Rejects (nothing saved) when the result
+   * fails the configSchema or the plugin's onConfigChange listener throws.
+   */
+  updateSettings(plugin: string, patch: SettingsPatch): Promise<PluginSettings>;
   shutdown(): Promise<void>;
 }
 
@@ -95,8 +140,10 @@ function errorMessage(error: unknown): string {
 export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
   const valetHome = opts.valetHome ?? defaultValetHome();
   mkdirSync(valetHome, { recursive: true });
-  const { configPath, config: bootConfig } = loadConfig(valetHome);
-  let config = bootConfig;
+  const { configPath, config: bootFile } = loadConfig(valetHome);
+  let fileConfig = bootFile;
+  let overlay: SettingsOverlay = loadOverlay(valetHome);
+  let config = layer(fileConfig, overlay);
   const log = createLogger({ valetHome, out: opts.out });
   const coreLog = log.forPlugin("core");
 
@@ -127,6 +174,11 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
     const byId = new Map(records.map((r) => [r.id, r]));
     const loadOrder = resolvePlugins(records, config, coreLog);
 
+    const pendingRestart = new Map<string, string>();
+    /** A plugin's config block with its schema's defaults filled in. */
+    const blockOf = (c: ValetConfig, id: string): Record<string, unknown> =>
+      withDefaults(byId.get(id)?.manifest?.configSchema, c.plugins[id]?.config ?? {});
+
     // 5.2 step 5: activate sequentially in load order.
     const activationTimeoutMs = opts.activationTimeoutMs ?? ACTIVATION_TIMEOUT_MS;
     const activated: { rec: PluginRecord; plugin: ValetPlugin; runtime: PluginRuntime }[] = [];
@@ -146,7 +198,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         runtime = buildPluginContext(
           ctxDeps,
           { id: rec.id, version: manifest.version, dir: rec.dir, manifest },
-          config.plugins[rec.id]?.config ?? {},
+          blockOf(config, rec.id),
         );
         const ctx = runtime.ctx;
         await withTimeout(
@@ -172,9 +224,6 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       await bus.emitAs({ plugin: "core" }, "run.interrupted", { run });
     }
 
-    const pendingRestart = new Map<string, string>();
-    const blockOf = (c: ValetConfig, id: string): Record<string, unknown> => c.plugins[id]?.config ?? {};
-
     const doReload = async (): Promise<ReloadResult> => {
       const rejected = (errors: string[]): ReloadResult => ({
         ok: false,
@@ -183,8 +232,12 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         errors,
       });
       let next: ValetConfig;
+      let nextFile: ValetConfig;
+      let nextOverlay: SettingsOverlay;
       try {
-        next = loadConfig(valetHome).config;
+        nextFile = loadConfig(valetHome).config;
+        nextOverlay = loadOverlay(valetHome);
+        next = layer(nextFile, nextOverlay);
       } catch (error) {
         return rejected([errorMessage(error)]);
       }
@@ -214,6 +267,8 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         server: { ...old.server, allowedOrigins: next.server.allowedOrigins },
         plugins: next.plugins,
       };
+      fileConfig = nextFile;
+      overlay = nextOverlay;
 
       const changed: string[] = [];
       for (const { rec, runtime } of activated) {
@@ -246,6 +301,76 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       return { ok: true, changed, restartRequired, errors: [] };
     };
 
+    const settingsOf = (rec: PluginRecord): PluginSettings => {
+      const m = rec.manifest;
+      const schema = m?.configSchema;
+      const enabled = config.plugins[rec.id]?.enabled ?? true;
+      return {
+        plugin: rec.id,
+        ...(m?.name === undefined ? {} : { name: m.name }),
+        ...(m?.description === undefined ? {} : { description: m.description }),
+        ...(m?.version === undefined ? {} : { version: m.version }),
+        provides: m?.provides ?? [],
+        state: rec.state,
+        enabled,
+        ...(schema === undefined ? {} : { schema }),
+        values: blockOf(config, rec.id),
+        sources: sourcesOf(schema, fileConfig.plugins[rec.id]?.config, overlay.plugins[rec.id]?.config),
+        ...(pendingRestart.has(rec.id) ? { restartRequired: pendingRestart.get(rec.id) as string } : {}),
+      };
+    };
+
+    const doUpdate = async (id: string, patch: SettingsPatch): Promise<PluginSettings> => {
+      const rec = byId.get(id);
+      if (rec === undefined || rec.manifest === undefined)
+        throw new SettingsError(404, `unknown plugin "${id}"`);
+      const nextOverlay = patchOverlay(overlay, id, patch, fileConfig.plugins[id]?.enabled);
+      const next = layer(fileConfig, nextOverlay);
+      const block = blockOf(next, id);
+      const schema = rec.manifest.configSchema;
+      if (schema !== undefined) {
+        const errors = validateJsonSchema(block, schema);
+        if (errors.length > 0) throw new SettingsError(400, errors.join("; "));
+      } else if (Object.keys(block).length > 0) {
+        throw new SettingsError(400, `plugin "${id}" has no configSchema, so it takes no settings`);
+      }
+      const live = activated.find((a) => a.rec.id === id);
+      const changed = !sameConfig(blockOf(config, id), block);
+      let applied = false;
+      if (live !== undefined && changed) {
+        try {
+          applied = await live.runtime.applyConfig(block);
+        } catch (error) {
+          throw new SettingsError(422, errorMessage(error));
+        }
+      }
+      saveOverlay(valetHome, nextOverlay);
+      overlay = nextOverlay;
+      config = { ...config, plugins: next.plugins };
+      const running = rec.state !== "disabled";
+      const toggle = /^(enabled|disabled);/;
+      if ((next.plugins[id]?.enabled ?? true) !== running) {
+        pendingRestart.set(id, running ? "disabled; stops on restart" : "enabled; loads on restart");
+      } else if (changed && !applied) {
+        pendingRestart.set(
+          id,
+          live === undefined
+            ? "loads with these settings on restart"
+            : "plugin does not support live config changes",
+        );
+      } else if (applied || toggle.test(pendingRestart.get(id) ?? "")) {
+        pendingRestart.delete(id);
+      }
+      if (changed || patch.enabled !== undefined) {
+        coreLog.info(`plugin "${id}" settings saved`, { plugin: id, applied });
+        bus.signalAs({ plugin: "core" }, "core.config.changed", {
+          changed: applied ? [id] : [],
+          restartRequired: pendingRestart.has(id) ? [id] : [],
+        });
+      }
+      return settingsOf(rec);
+    };
+
     let reloading: Promise<unknown> = Promise.resolve();
     let closing = false;
     const kernel: ValetKernel = {
@@ -256,6 +381,14 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       },
       reload() {
         const run = reloading.then(doReload);
+        reloading = run.catch(() => undefined);
+        return run;
+      },
+      settings() {
+        return records.filter((r) => r.manifest !== undefined).map(settingsOf);
+      },
+      updateSettings(id, patch) {
+        const run = reloading.then(() => doUpdate(id, patch));
         reloading = run.catch(() => undefined);
         return run;
       },

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Logger, PluginManifest } from "@valethq/sdk";
 import type { ValetConfig } from "./config";
 import { validateJsonSchema } from "./jsonschema";
+import { withDefaults } from "./settings";
 import { validateManifest } from "./manifest";
 
 export type PluginState = "pending" | "active" | "failed" | "disabled";
@@ -85,7 +86,7 @@ export function resolvePlugins(records: PluginRecord[], config: ValetConfig, log
     }
     const schema = rec.manifest?.configSchema;
     if (schema !== undefined) {
-      const errors = validateJsonSchema(config.plugins[rec.id]?.config ?? {}, schema);
+      const errors = validateJsonSchema(withDefaults(schema, config.plugins[rec.id]?.config ?? {}), schema);
       if (errors.length > 0) {
         rec.state = "failed";
         rec.error = `invalid plugin config: ${errors.join("; ")}`;

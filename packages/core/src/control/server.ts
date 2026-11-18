@@ -114,6 +114,10 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
   const restDeps: RestDeps = {
     plugins: () => kernel.plugins(),
     reload: () => kernel.reload(),
+    settings: () => kernel.settings(),
+    updateSettings: (plugin, patch) => kernel.updateSettings(plugin, patch),
+    secretChanged: (name) => kernel.bus.signalAs({ plugin: "core" }, "core.secrets.changed", { name }),
+    valetHome: kernel.valetHome,
     blobMeta: (id) => {
       const row = kernel.store.db
         .query<{ sha256: string; mime: string | null; name: string | null }, string>(

@@ -1,6 +1,7 @@
 /**
  * JSON-schema subset validator (AGENTS: no ajv). Supports the keys plugins
- * actually use: type, required, properties, items, enum, additionalProperties.
+ * actually use: type, required, properties, items, enum, additionalProperties,
+ * minimum, maximum, minLength and maxLength. Other keys (title, default, x-*) are ignored.
  */
 
 type Schema = Record<string, unknown>;
@@ -30,6 +31,18 @@ function check(value: unknown, schema: Schema, path: string, errors: string[]): 
     if (!Array.isArray(schema.enum) || !schema.enum.some((v) => Bun.deepEquals(v, value))) {
       errors.push(`${path}: not in enum ${JSON.stringify(schema.enum)}`);
     }
+  }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum)
+      errors.push(`${path}: must be at least ${schema.minimum}`);
+    if (typeof schema.maximum === "number" && value > schema.maximum)
+      errors.push(`${path}: must be at most ${schema.maximum}`);
+  }
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength)
+      errors.push(`${path}: must be at least ${schema.minLength} characters`);
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength)
+      errors.push(`${path}: must be at most ${schema.maxLength} characters`);
   }
   if (typeOf(value) === "object") {
     const obj = value as Record<string, unknown>;

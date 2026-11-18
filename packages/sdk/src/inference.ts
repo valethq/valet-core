@@ -8,6 +8,30 @@ export interface ModelInfo {
   input: ("text" | "image")[];
   reasoning: boolean;
   cost?: { input: number; output: number; cacheRead?: number }; // per 1M tokens
+  /** Reasoning effort levels the model takes, lowest first, e.g. ["low", "medium", "high"]. Absent: none to pick. */
+  efforts?: string[];
+  /** The effort a selection without one runs at. */
+  defaultEffort?: string;
+  /** The model has a fast mode: a faster serving tier, usually billed higher. */
+  fast?: boolean;
+  /** Fast mode is on unless the selection turns it off. */
+  fastByDefault?: boolean;
+  /** Listed, but left out of pickers until the user shows it (previews, niche variants). */
+  hidden?: boolean;
+}
+
+/** How a model runs. Picked alongside the model and never encoded in its id. */
+export interface ModelOptions {
+  /** One of the model's `efforts`; unset runs its `defaultEffort`. */
+  effort?: string;
+  /** Fast mode on or off; unset follows `fastByDefault`. */
+  fast?: boolean;
+}
+
+/** A model choice as sessions, projects and config store it. */
+export interface ModelRef extends ModelOptions {
+  provider: string;
+  model: string;
 }
 
 export type InferenceProvider = ModelProvider | AgentProvider;
@@ -42,13 +66,12 @@ export interface ModelProvider extends ProviderBase {
   stream(req: InferenceRequest, signal: AbortSignal): AsyncIterable<InferenceChunk>;
 }
 
-export interface InferenceRequest {
+export interface InferenceRequest extends ModelOptions {
   model: string;
   system: string;
   messages: ModelMessage[];
   tools: ToolSpec[];
   maxOutputTokens?: number;
-  reasoning?: "off" | "low" | "medium" | "high";
   meta: { sessionId: string; runId: string };
 }
 
@@ -76,7 +99,7 @@ export interface AgentProvider extends ProviderBase {
   open(opts: AgentOpenOptions): Promise<AgentSession>;
 }
 
-export interface AgentOpenOptions {
+export interface AgentOpenOptions extends ModelOptions {
   sessionId: string;
   cwd: string;
   model: string;
@@ -114,7 +137,8 @@ export interface AgentSession {
     input: { content: ModelContent[]; preamble?: string },
     signal: AbortSignal,
   ): AsyncIterable<AgentEvent>;
-  setModel?(model: string): Promise<void>;
+  /** Switches the open session to another model or other options; `options` replaces the previous ones whole. */
+  setModel?(model: string, options: ModelOptions): Promise<void>;
   /**
    * Asks the harness to compact now (Claude Code `/compact`, Devin `/compact`). Yields the same
    * compaction-start/end events as an automatic compaction, then finish.
