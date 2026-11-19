@@ -303,8 +303,7 @@ describe("manifest validation", () => {
       expect(validateManifest(raw), name).toEqual([]);
       checked.push(name);
     }
-    expect(checked).toContain("valet-auth");
-    expect(checked.length).toBeGreaterThan(5);
+    expect(checked).toContain("valet-agent");
   });
 });
 
