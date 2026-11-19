@@ -21,6 +21,8 @@ export interface WsSocketData {
   /** Upgrade request headers (cookie, authorization, ...) so identity providers can re-identify the socket. */
   headers: [string, string][];
   closed?: boolean;
+  /** Inbound frames run one at a time so a later unsub cannot lose to an in-flight sub. */
+  chain?: Promise<void>;
 }
 
 const send = (ws: ServerWebSocket<WsSocketData>, frame: ServerFrame): void => {
@@ -100,7 +102,7 @@ export class WsHub {
     ws.data.subs.clear();
   }
 
-  /** Closes (4401) every open socket whose credential no longer identifies the same principal. */
+  /** Rewrites principal and caller.actor when the same principal is still identified; closes (4401) otherwise. */
   async reidentifySockets(): Promise<void> {
     await Promise.all(
       [...this.#sockets].map(async (ws) => {
@@ -111,21 +113,33 @@ export class WsHub {
         } catch (error) {
           this.#deps.logger.error("ws re-identify failed", { error: String(error) });
         }
-        if (current === undefined || current.id !== principal?.id) {
-          ws.data.closed = true;
-          ws.data.subs.clear();
-          // spec-gap: ServerFrame has no error frame, so the close code is the only signal.
-          try {
-            ws.close(4401, "unauthenticated");
-          } catch {
-            // already closing
-          }
+        if (current !== undefined && current.id === principal?.id) {
+          ws.data.principal = current;
+          ws.data.caller = {
+            ...ws.data.caller,
+            actor: { principalId: current.id, role: current.role },
+          };
+          return;
+        }
+        ws.data.closed = true;
+        ws.data.subs.clear();
+        // spec-gap: ServerFrame has no error frame, so the close code is the only signal.
+        try {
+          ws.close(4401, "unauthenticated");
+        } catch {
+          // already closing
         }
       }),
     );
   }
 
   async message(ws: ServerWebSocket<WsSocketData>, raw: string | Buffer): Promise<void> {
+    const task = (ws.data.chain ?? Promise.resolve()).then(() => this.#handle(ws, raw));
+    ws.data.chain = task.catch(() => undefined);
+    await task;
+  }
+
+  async #handle(ws: ServerWebSocket<WsSocketData>, raw: string | Buffer): Promise<void> {
     let frame: ClientFrame;
     try {
       frame = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8")) as ClientFrame;
@@ -182,6 +196,8 @@ export class WsHub {
     frame: { topics: string[]; since?: Record<string, number> },
   ): Promise<void> {
     for (const topic of frame.topics ?? []) {
+      // Before admit, so a sub with no `since` can replay frames published while it waited.
+      const snapshot = this.#seq.get(topic) ?? 0;
       const { denied } = await this.#admit(ws, "ws.sub", "sub", topic);
       if (denied) {
         // spec-gap: sub carries no id, so a denied topic reports with the topic as id.
@@ -196,11 +212,15 @@ export class WsHub {
       const since = frame.since?.[topic];
       const buffer = this.#buffers.get(topic) ?? [];
       const latest = this.#seq.get(topic) ?? 0;
-      if (since !== undefined && buffer.length > 0 && since < latest - buffer.length) {
+      const floor = since ?? snapshot;
+      // Oldest kept seq is latest - length + 1, so floor == latest - length is still contiguous.
+      const behind = buffer.length > 0 && floor < latest - buffer.length;
+      const ahead = since !== undefined && since > latest;
+      if (behind || ahead) {
         send(ws, { type: "gap", topic });
-      } else if (since !== undefined) {
+      } else {
         for (const entry of buffer) {
-          if (entry.seq > since) {
+          if (entry.seq > floor) {
             send(ws, { type: "event", topic, seq: entry.seq, name: entry.name, data: entry.data });
           }
         }

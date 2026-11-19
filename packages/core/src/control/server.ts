@@ -66,26 +66,28 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
   kernel.ws.setBroadcast(hub.publish);
 
   // 10.3 core topics, driven by store after-hooks and signals.
+  // Topic id comes from the payload: session.delete's row is already gone. Skip cancelled actions.
   const coreEvents = kernel.bus.forPlugin("core");
-  const publishSessions = (sessionId: string, name: string, payload: unknown): void => {
-    const session = kernel.store.forCaller({ plugin: "core" }).sessions.get(sessionId);
-    if (session) hub.publish(`sessions:${session.projectId}`, name, payload);
-  };
-  coreEvents.after("session.create", (e) =>
-    publishSessions(e.payload.session.id, "session.create", e.payload),
-  );
-  coreEvents.after("session.update", (e) =>
-    publishSessions(e.payload.session.id, "session.update", e.payload),
-  );
-  coreEvents.after("session.delete", (e) =>
-    publishSessions(e.payload.session.id, "session.delete", e.payload),
-  );
-  coreEvents.after("message.create", (e) =>
-    hub.publish(`session:${e.payload.message.sessionId}`, "message.create", e.payload),
-  );
-  coreEvents.after("message.complete", (e) =>
-    hub.publish(`session:${e.payload.message.sessionId}`, "message.complete", e.payload),
-  );
+  coreEvents.after("session.create", (e) => {
+    if (e.cancelled) return;
+    hub.publish(`sessions:${e.payload.session.projectId}`, "session.create", e.payload);
+  });
+  coreEvents.after("session.update", (e) => {
+    if (e.cancelled) return;
+    hub.publish(`sessions:${e.payload.session.projectId}`, "session.update", e.payload);
+  });
+  coreEvents.after("session.delete", (e) => {
+    if (e.cancelled) return;
+    hub.publish(`sessions:${e.payload.session.projectId}`, "session.delete", e.payload);
+  });
+  coreEvents.after("message.create", (e) => {
+    if (e.cancelled) return;
+    hub.publish(`session:${e.payload.message.sessionId}`, "message.create", e.payload);
+  });
+  coreEvents.after("message.complete", (e) => {
+    if (e.cancelled) return;
+    hub.publish(`session:${e.payload.message.sessionId}`, "message.complete", e.payload);
+  });
   coreEvents.onSignal("message.delta", (p) => hub.publish(`session:${p.sessionId}`, "message.delta", p));
   coreEvents.after("run.start", (e) =>
     hub.publish(`session:${e.payload.run.sessionId}`, "run.start", e.payload),
