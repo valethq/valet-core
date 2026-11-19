@@ -18,6 +18,7 @@ import type { Logger, Secrets } from "@valethq/sdk";
 export function createSecrets(valetHome: string, log: Logger): Secrets {
   return {
     async get(name: string): Promise<string | undefined> {
+      if (!isSecretName(name)) throw new Error(`invalid secret name "${name}"`);
       const path = join(valetHome, "secrets", name);
       if (existsSync(path)) {
         const mode = statSync(path).mode & 0o777;

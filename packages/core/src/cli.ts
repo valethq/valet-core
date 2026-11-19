@@ -5,6 +5,7 @@ import { createControlServer } from "./control/index";
 import { boot } from "./kernel";
 import { discoverPlugins, resolvePlugins } from "./loader";
 import { createLogger } from "./log";
+import { layer, loadOverlay } from "./settings";
 
 function flagValue(args: string[], name: string): string | undefined {
   const at = args.indexOf(name);
@@ -62,10 +63,11 @@ function doctor(args: string[]): number {
   const valetHome = flagValue(args, "--home") ?? defaultValetHome();
   let failures = 0;
   try {
-    const { configPath, config } = loadConfig(valetHome);
+    const { configPath, config: fileConfig } = loadConfig(valetHome);
     console.log(`config: ${configPath}`);
     console.log(`valet home: ${valetHome}`);
     const silent = createLogger({ out: () => {} });
+    const config = layer(fileConfig, loadOverlay(valetHome));
     const records = discoverPlugins(config, silent);
     resolvePlugins(records, config, silent);
     if (records.length === 0) {

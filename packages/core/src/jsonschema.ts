@@ -33,10 +33,26 @@ function check(value: unknown, schema: Schema, path: string, errors: string[]): 
     }
   }
   if (typeof value === "number") {
-    if (typeof schema.minimum === "number" && value < schema.minimum)
-      errors.push(`${path}: must be at least ${schema.minimum}`);
-    if (typeof schema.maximum === "number" && value > schema.maximum)
-      errors.push(`${path}: must be at most ${schema.maximum}`);
+    const exclMin = schema.exclusiveMinimum;
+    const exclMax = schema.exclusiveMaximum;
+    if (typeof exclMin === "number") {
+      if (value <= exclMin) errors.push(`${path}: must be greater than ${exclMin}`);
+    } else if (typeof schema.minimum === "number") {
+      if (exclMin === true) {
+        if (value <= schema.minimum) errors.push(`${path}: must be greater than ${schema.minimum}`);
+      } else if (value < schema.minimum) {
+        errors.push(`${path}: must be at least ${schema.minimum}`);
+      }
+    }
+    if (typeof exclMax === "number") {
+      if (value >= exclMax) errors.push(`${path}: must be less than ${exclMax}`);
+    } else if (typeof schema.maximum === "number") {
+      if (exclMax === true) {
+        if (value >= schema.maximum) errors.push(`${path}: must be less than ${schema.maximum}`);
+      } else if (value > schema.maximum) {
+        errors.push(`${path}: must be at most ${schema.maximum}`);
+      }
+    }
   }
   if (typeof value === "string") {
     if (typeof schema.minLength === "number" && value.length < schema.minLength)

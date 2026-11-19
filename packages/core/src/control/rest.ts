@@ -98,7 +98,20 @@ interface RestRoute {
   handler: RestHandler;
 }
 
-const num = (v: string | null): number | undefined => (v === null ? undefined : Number(v));
+type QueryNum = number | undefined | Response;
+
+function parseLimit(v: string | null): QueryNum {
+  if (v === null) return undefined;
+  if (!/^[1-9]\d*$/.test(v)) return errorJson(400, "bad_request", "limit must be a positive integer");
+  return Number(v);
+}
+
+function parseFiniteQuery(v: string | null, name: string): QueryNum {
+  if (v === null) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return errorJson(400, "bad_request", `${name} must be a finite number`);
+  return n;
+}
 
 export interface RestDeps {
   plugins(): PluginStatus[];
@@ -178,12 +191,16 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
 
     r("GET", "/sessions", async (req, _ctx, store) => {
       const q = new URL(req.url).searchParams;
+      const limit = parseLimit(q.get("limit"));
+      if (limit instanceof Response) return limit;
+      const before = parseFiniteQuery(q.get("before"), "before");
+      if (before instanceof Response) return before;
       return json(
         store.sessions.list({
           ...(q.get("projectId") === null ? {} : { projectId: q.get("projectId") as string }),
           ...(q.get("status") === null ? {} : { status: q.get("status") as Session["status"] }),
-          ...(num(q.get("limit")) === undefined ? {} : { limit: num(q.get("limit")) }),
-          ...(num(q.get("before")) === undefined ? {} : { before: num(q.get("before")) }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(before === undefined ? {} : { before }),
         }),
       );
     }),
@@ -222,10 +239,14 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("GET", "/sessions/:id/messages", async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const q = new URL(req.url).searchParams;
+      const beforeSeq = parseFiniteQuery(q.get("beforeSeq"), "beforeSeq");
+      if (beforeSeq instanceof Response) return beforeSeq;
+      const limit = parseLimit(q.get("limit"));
+      if (limit instanceof Response) return limit;
       return json(
         store.messages.list(ctx.params.id as string, {
-          ...(num(q.get("beforeSeq")) === undefined ? {} : { beforeSeq: num(q.get("beforeSeq")) }),
-          ...(num(q.get("limit")) === undefined ? {} : { limit: num(q.get("limit")) }),
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+          ...(limit === undefined ? {} : { limit }),
         }),
       );
     }),
@@ -250,9 +271,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
           ...(clientId === undefined ? {} : { meta: { clientMessageId: clientId } }),
           role: b.role as "user" | "assistant" | "system" | "tool",
           parts: b.parts as Parameters<Store["messages"]["create"]>[0]["parts"],
-          ...(b.authorPrincipalId === undefined && ctx.caller.actor === undefined
-            ? {}
-            : { authorPrincipalId: (b.authorPrincipalId ?? ctx.caller.actor?.principalId) as string }),
+          ...(ctx.caller.actor === undefined ? {} : { authorPrincipalId: ctx.caller.actor.principalId }),
           ...(b.runId === undefined ? {} : { runId: String(b.runId) }),
           ...(b.status === undefined
             ? {}
