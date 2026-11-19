@@ -8,6 +8,20 @@ import type {
   ValetSignals,
 } from "@valethq/sdk";
 
+// spec-gap: catalog prefixes tool and part are reserved with the 7.2 list; identity is not (plugins emit it).
+export const CORE_EVENT_NAMESPACES: ReadonlySet<string> = new Set([
+  "core",
+  "control",
+  "message",
+  "part",
+  "plugin",
+  "principal",
+  "project",
+  "run",
+  "session",
+  "tool",
+]);
+
 type EvName = Extract<keyof ValetEvents, string>;
 type SigName = Extract<keyof ValetSignals, string>;
 

@@ -136,6 +136,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface ActivatedPlugin {
+  rec: PluginRecord;
+  plugin: ValetPlugin;
+  runtime: PluginRuntime;
+}
+
 /** Boots the kernel: config, store, plugin discovery/activation, then core.ready (5.2). */
 export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
   const valetHome = opts.valetHome ?? defaultValetHome();
@@ -160,6 +166,24 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
   opts.tapBus?.(bus);
 
   const store = await openStore({ valetHome, dbPath: opts.dbPath, bus, logger: coreLog });
+  const activated: ActivatedPlugin[] = [];
+  const deactivationTimeoutMs = opts.deactivationTimeoutMs ?? DEACTIVATION_TIMEOUT_MS;
+  const deactivateAll = async (list: readonly ActivatedPlugin[]): Promise<void> => {
+    for (const { rec, plugin, runtime } of list.slice().reverse()) {
+      // 5.3: abort first so deactivate can observe ctx.signal, then dispose.
+      runtime.abort.abort();
+      const stopping = Promise.resolve().then(() => plugin.deactivate?.());
+      void stopping.catch(() => {});
+      try {
+        await withTimeout(stopping, deactivationTimeoutMs, `plugin "${rec.id}" deactivation`);
+      } catch (error) {
+        coreLog.error(`plugin "${rec.id}" deactivation failed: ${errorMessage(error)}`, {
+          plugin: rec.id,
+        });
+      }
+      await runtime.dispose();
+    }
+  };
   try {
     // 7.4: find the leftovers of an unclean stop before plugins activate.
     const interrupted = store.findInterruptedRuns();
@@ -181,7 +205,6 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
 
     // 5.2 step 5: activate sequentially in load order.
     const activationTimeoutMs = opts.activationTimeoutMs ?? ACTIVATION_TIMEOUT_MS;
-    const activated: { rec: PluginRecord; plugin: ValetPlugin; runtime: PluginRuntime }[] = [];
     for (const rec of loadOrder) {
       const unmet = unmetAtActivation(rec, byId);
       if (unmet !== undefined) {
@@ -192,7 +215,9 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       }
       let runtime: PluginRuntime | undefined;
       try {
-        const plugin = await importPlugin(rec);
+        const importing = importPlugin(rec);
+        void importing.catch(() => {});
+        const plugin = await withTimeout(importing, activationTimeoutMs, `plugin "${rec.id}" import`);
         const manifest = rec.manifest;
         if (!manifest) throw new Error("manifest missing at activation");
         runtime = buildPluginContext(
@@ -201,11 +226,9 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
           blockOf(config, rec.id),
         );
         const ctx = runtime.ctx;
-        await withTimeout(
-          Promise.resolve().then(() => plugin.activate(ctx)),
-          activationTimeoutMs,
-          `plugin "${rec.id}" activation`,
-        );
+        const activating = Promise.resolve().then(() => plugin.activate(ctx));
+        void activating.catch(() => {});
+        await withTimeout(activating, activationTimeoutMs, `plugin "${rec.id}" activation`);
         rec.state = "active";
         activated.push({ rec, plugin, runtime });
         coreLog.info(`plugin "${rec.id}" active`, { plugin: rec.id, order: rec.order });
@@ -213,8 +236,11 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         rec.state = "failed";
         rec.error = errorMessage(error);
         coreLog.error(`plugin "${rec.id}" failed to activate: ${rec.error}`, { plugin: rec.id });
-        // 5.2 step 5: dispose anything it registered; hard dependents fail next.
-        await runtime?.dispose();
+        // 5.2 step 5: abort, then dispose, so a late activate cannot register hooks.
+        if (runtime !== undefined) {
+          runtime.abort.abort();
+          await runtime.dispose();
+        }
       }
     }
 
@@ -421,27 +447,12 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       async shutdown() {
         if (closing) return;
         closing = true;
-        // 5.2 step 7: core.shutdown, then deactivate in reverse order (5s each),
-        // aborting each ctx.signal. Then checkpoint SQLite.
+        // 5.2 step 7: core.shutdown, then deactivate in reverse order (5s each).
+        // Abort each ctx.signal before deactivate so the plugin can observe it.
         await bus.emitAs({ plugin: "core" }, "core.shutdown", {}).catch((error: unknown) => {
           coreLog.error("core.shutdown emit failed", { error: errorMessage(error) });
         });
-        const deactivationTimeoutMs = opts.deactivationTimeoutMs ?? DEACTIVATION_TIMEOUT_MS;
-        for (const { rec, plugin, runtime } of activated.slice().reverse()) {
-          try {
-            await withTimeout(
-              Promise.resolve().then(() => plugin.deactivate?.()),
-              deactivationTimeoutMs,
-              `plugin "${rec.id}" deactivation`,
-            );
-          } catch (error) {
-            coreLog.error(`plugin "${rec.id}" deactivation failed: ${errorMessage(error)}`, {
-              plugin: rec.id,
-            });
-          }
-          runtime.abort.abort();
-          await runtime.dispose();
-        }
+        await deactivateAll(activated);
         try {
           store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
         } catch (error) {
@@ -452,6 +463,12 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
     };
     return kernel;
   } catch (error) {
+    // core.ready / run.interrupted can reject after plugins are active. Stop them before closing the store.
+    try {
+      await deactivateAll(activated);
+    } catch (cleanupError) {
+      coreLog.error("boot cleanup failed", { error: errorMessage(cleanupError) });
+    }
     store.close();
     throw error;
   }

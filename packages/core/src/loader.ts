@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Logger, PluginManifest } from "@valethq/sdk";
 import type { ValetConfig } from "./config";
@@ -22,6 +22,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isPluginDir(base: string, entry: Dirent): boolean {
+  if (entry.isDirectory()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  try {
+    return statSync(join(base, entry.name)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** 5.2 step 1: read every "PLUGIN_DIR/manifest.json" under each plugin path. Throws on a duplicate id. */
 export function discoverPlugins(config: ValetConfig, log: Logger): PluginRecord[] {
   const records: PluginRecord[] = [];
@@ -32,7 +42,7 @@ export function discoverPlugins(config: ValetConfig, log: Logger): PluginRecord[
       continue;
     }
     const entries = readdirSync(base, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((entry) => isPluginDir(base, entry))
       .sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const dir = join(base, entry.name);
@@ -168,34 +178,11 @@ export function resolvePlugins(records: PluginRecord[], config: ValetConfig, log
   }
 
   // Step 4: Kahn's algorithm, ties broken by id so boot order is deterministic.
-  const indegree = new Map<string, number>(pending.map((r) => [r.id, 0]));
-  for (const [from, tos] of edges) {
-    if (!indegree.has(from)) continue;
-    for (const to of tos) indegree.set(to, (indegree.get(to) ?? 0) + 1);
-  }
-  const ready = pending
-    .filter((r) => (indegree.get(r.id) ?? 0) === 0)
-    .map((r) => r.id)
-    .sort();
-  const order: PluginRecord[] = [];
   const byId = new Map(pending.map((r) => [r.id, r]));
-  while (ready.length > 0) {
-    const id = ready.shift() as string;
-    const rec = byId.get(id);
-    if (!rec) continue;
-    order.push(rec);
-    for (const to of edges.get(id) ?? []) {
-      const next = (indegree.get(to) ?? 0) - 1;
-      indegree.set(to, next);
-      if (next === 0) {
-        ready.push(to);
-        ready.sort();
-      }
-    }
-  }
+  let order = kahn(pending, edges);
 
-  // Leftover nodes are in a cycle or downstream of one: each still has an unsatisfied edge.
-  // Disjoint cycles get their own error; dependents of a cycle cascade-fail below.
+  // Leftover nodes are in a cycle or downstream of one.
+  // Disjoint cycles get their own error; hard dependents cascade-fail below.
   const leftover = pending.filter((r) => !order.includes(r));
   if (leftover.length > 0) {
     const remaining = new Set(leftover.map((r) => r.id));
@@ -234,9 +221,59 @@ export function resolvePlugins(records: PluginRecord[], config: ValetConfig, log
         }
       }
     }
+
+    // Edges out of failed nodes are gone. Optional dependents of a cycle still activate.
+    const ordered = new Set(order.map((r) => r.id));
+    const still = pending.filter((r) => r.state === "pending" && !ordered.has(r.id));
+    if (still.length > 0) {
+      const more = kahn(still, edges);
+      order = order.concat(more);
+      const scheduled = new Set(more.map((r) => r.id));
+      const stuck = still.filter((r) => !scheduled.has(r.id));
+      if (stuck.length > 0) {
+        log.warn(`plugins left unresolved after a dependency cycle: ${stuck.map((r) => r.id).join(", ")}`);
+        for (const rec of stuck) {
+          rec.state = "failed";
+          rec.error = "unresolved dependency cycle";
+        }
+      }
+    }
   }
 
   for (const [i, rec] of order.entries()) rec.order = i;
+  return order;
+}
+
+/** Kahn's algorithm over `nodes`. Edges whose source is outside `nodes` are ignored. */
+function kahn(nodes: PluginRecord[], edges: Map<string, Set<string>>): PluginRecord[] {
+  const indegree = new Map<string, number>(nodes.map((r) => [r.id, 0]));
+  for (const rec of nodes) {
+    for (const to of edges.get(rec.id) ?? []) {
+      if (!indegree.has(to)) continue;
+      indegree.set(to, (indegree.get(to) ?? 0) + 1);
+    }
+  }
+  const byId = new Map(nodes.map((r) => [r.id, r]));
+  const ready = nodes
+    .filter((r) => (indegree.get(r.id) ?? 0) === 0)
+    .map((r) => r.id)
+    .sort();
+  const order: PluginRecord[] = [];
+  while (ready.length > 0) {
+    const id = ready.shift() as string;
+    const rec = byId.get(id);
+    if (!rec) continue;
+    order.push(rec);
+    for (const to of edges.get(id) ?? []) {
+      if (!indegree.has(to)) continue;
+      const next = (indegree.get(to) ?? 0) - 1;
+      indegree.set(to, next);
+      if (next === 0) {
+        ready.push(to);
+        ready.sort();
+      }
+    }
+  }
   return order;
 }
 
