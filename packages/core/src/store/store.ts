@@ -32,6 +32,34 @@ type EvName = Extract<keyof ValetEvents, string>;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["complete", "cancelled", "error", "interrupted"]);
 const PART_CHECKPOINT_MS = 500;
 
+/** Use the provisional seq when it is still free; otherwise take the next one inside the write. */
+function claimSeq(db: Database, sessionId: string, reserved: number): number {
+  const taken = db
+    .query("SELECT 1 AS n FROM messages WHERE session_id = ? AND seq = ?")
+    .get(sessionId, reserved);
+  if (taken === null) return reserved;
+  const row = db
+    .query<{ seq: number }, string>(
+      "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM messages WHERE session_id = ?",
+    )
+    .get(sessionId);
+  return row?.seq ?? 1;
+}
+
+function overlayPatch<T extends object>(
+  fresh: T,
+  built: T,
+  final: T,
+  patch: Partial<T>,
+  keys: readonly (keyof T)[],
+): T {
+  const merged = { ...fresh };
+  for (const key of keys) {
+    if (patch[key] !== undefined || !Bun.deepEquals(final[key], built[key])) merged[key] = final[key];
+  }
+  return merged;
+}
+
 /** Latest assistant message time for a session row, computed on read (no column to keep in sync). */
 const lastResponseAt = (sessionRef: string): string =>
   `(SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = ${sessionRef} AND m.role = 'assistant') AS last_response_at`;
@@ -46,6 +74,8 @@ export interface StoreDeps {
   partTypes: PartTypeRegistry;
   /** Manifest facts of loaded plugins, recorded with the part types they define. */
   origins: Map<string, PluginOrigin>;
+  /** Set by close() so a part checkpoint timer cannot touch a closed database. */
+  closed?: boolean;
 }
 
 function denialError(denial: Denial): ServiceDeniedError {
@@ -151,6 +181,11 @@ export class StoreView implements Store {
     return row === null ? undefined : rowToRun(row as Record<string, unknown>);
   }
 
+  #assertRun(sessionId: string, runId: string): void {
+    const run = this.#getRun(runId);
+    if (!run || run.sessionId !== sessionId) throw new Error(`unknown run "${runId}"`);
+  }
+
   #getMessage(id: string): Message | undefined {
     const row = this.#deps.db.query("SELECT * FROM messages WHERE id = ?").get(id);
     return row === null ? undefined : rowToMessage(row as Record<string, unknown>);
@@ -206,21 +241,35 @@ export class StoreView implements Store {
     ): Promise<Project | CancelledResult> => {
       const current = this.projects.get(id);
       if (!current) throw new Error(`unknown project "${id}"`);
-      const project: Project = {
+      const built: Project = {
         ...current,
         name: patch.name ?? current.name,
         workspaceDir: patch.workspaceDir ?? current.workspaceDir,
         settings: patch.settings ?? current.settings,
         updatedAt: Date.now(),
       };
-      return this.#action(this.#caller, "project.update", { project }, ({ project: final }) =>
+      return this.#action(this.#caller, "project.update", { project: built }, ({ project: final }) =>
         this.#deps.db.transaction(() => {
+          const fresh = this.projects.get(final.id);
+          if (!fresh) throw new Error(`unknown project "${final.id}"`);
+          const merged = overlayPatch<Project>(fresh, built, final, patch, [
+            "name",
+            "workspaceDir",
+            "settings",
+          ]);
+          merged.updatedAt = Date.now();
           this.#deps.db
             .query(
               "UPDATE projects SET name = ?, workspace_dir = ?, settings = ?, updated_at = ? WHERE id = ?",
             )
-            .run(final.name, final.workspaceDir, JSON.stringify(final.settings), final.updatedAt, final.id);
-          return final;
+            .run(
+              merged.name,
+              merged.workspaceDir,
+              JSON.stringify(merged.settings),
+              merged.updatedAt,
+              merged.id,
+            );
+          return merged;
         })(),
       );
     },
@@ -328,7 +377,7 @@ export class StoreView implements Store {
     ): Promise<Session | CancelledResult> => {
       const current = this.#getSession(id);
       if (!current) throw new Error(`unknown session "${id}"`);
-      const session: Session = {
+      const built: Session = {
         ...current,
         title: patch.title === undefined ? current.title : patch.title,
         color: patch.color === undefined ? current.color : patch.color,
@@ -336,22 +385,35 @@ export class StoreView implements Store {
         settings: patch.settings === undefined ? current.settings : patch.settings,
         updatedAt: Date.now(),
       };
-      return this.#action(this.#caller, "session.update", { session, patch }, ({ session: final }) =>
-        this.#deps.db.transaction(() => {
-          this.#deps.db
-            .query(
-              "UPDATE sessions SET title = ?, color = ?, status = ?, settings = ?, updated_at = ? WHERE id = ?",
-            )
-            .run(
-              final.title,
-              final.color,
-              final.status,
-              JSON.stringify(final.settings),
-              final.updatedAt,
-              final.id,
-            );
-          return final;
-        })(),
+      return this.#action(
+        this.#caller,
+        "session.update",
+        { session: built, patch },
+        ({ session: final, patch: finalPatch }) =>
+          this.#deps.db.transaction(() => {
+            const fresh = this.#getSession(final.id);
+            if (!fresh) throw new Error(`unknown session "${final.id}"`);
+            const merged = overlayPatch<Session>(fresh, built, final, finalPatch, [
+              "title",
+              "color",
+              "status",
+              "settings",
+            ]);
+            merged.updatedAt = Date.now();
+            this.#deps.db
+              .query(
+                "UPDATE sessions SET title = ?, color = ?, status = ?, settings = ?, updated_at = ? WHERE id = ?",
+              )
+              .run(
+                merged.title,
+                merged.color,
+                merged.status,
+                JSON.stringify(merged.settings),
+                merged.updatedAt,
+                merged.id,
+              );
+            return merged;
+          })(),
       );
     },
 
@@ -363,6 +425,11 @@ export class StoreView implements Store {
           // spec-gap: plugin-owned tables that reference sessions are not cleaned up here.
           this.#deps.db
             .query("UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?")
+            .run(final.id);
+          this.#deps.db
+            .query(
+              "UPDATE messages SET run_id = NULL WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?)",
+            )
             .run(final.id);
           this.#deps.db.query("DELETE FROM messages WHERE session_id = ?").run(final.id);
           this.#deps.db.query("DELETE FROM runs WHERE session_id = ?").run(final.id);
@@ -440,6 +507,7 @@ export class StoreView implements Store {
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult> => {
       for (const data of m.parts) this.#deps.partTypes.check(data, this.#caller.plugin);
+      if (m.runId !== undefined) this.#assertRun(m.sessionId, m.runId);
       const now = Date.now();
       const seqRow = this.#deps.db
         .query<{ seq: number }, string>(
@@ -470,8 +538,14 @@ export class StoreView implements Store {
         updatedAt: now,
       }));
       const caller = this.#callerWithAuthor(message.authorPrincipalId);
-      return this.#action(caller, "message.create", { message, parts }, ({ message: msg, parts: prts }) =>
+      return this.#action(caller, "message.create", { message, parts }, (payload) =>
         this.#deps.db.transaction(() => {
+          const drafted = payload.message;
+          if (drafted.runId !== null) this.#assertRun(drafted.sessionId, drafted.runId);
+          const seqNow = claimSeq(this.#deps.db, drafted.sessionId, drafted.seq);
+          const msg = seqNow === drafted.seq ? drafted : { ...drafted, seq: seqNow };
+          // spec-gap: dev mode freezes the action payload, so after hooks keep the pre-commit seq if it had to change.
+          if (msg !== drafted && !Object.isFrozen(payload)) payload.message = msg;
           this.#deps.db
             .query(
               `INSERT INTO messages (id, session_id, seq, role, author_principal_id, run_id, status, origin, meta, created_at, updated_at)
@@ -490,11 +564,11 @@ export class StoreView implements Store {
               msg.createdAt,
               msg.updatedAt,
             );
-          for (const part of prts) this.#insertPart(part);
+          for (const part of payload.parts) this.#insertPart(part);
           this.#deps.db
             .query("UPDATE sessions SET last_message_at = ? WHERE id = ?")
             .run(msg.createdAt, msg.sessionId);
-          return { message: msg, parts: prts };
+          return { message: msg, parts: payload.parts };
         })(),
       );
     },
@@ -625,6 +699,7 @@ export class StoreView implements Store {
     ): void => {
       const current = this.#getRun(id);
       if (!current) throw new Error(`unknown run "${id}"`);
+      const wasTerminal = TERMINAL_RUN.has(current.status);
       const now = Date.now();
       const run: Run = { ...current };
       if (patch.status !== undefined) run.status = patch.status;
@@ -636,7 +711,7 @@ export class StoreView implements Store {
       if (TERMINAL_RUN.has(run.status) && run.endedAt === null) run.endedAt = now;
       this.#writeRun(run, patch.usage);
       this.#emitAfterWrite("run.update", { run });
-      if (TERMINAL_RUN.has(run.status)) this.#emitAfterWrite("run.end", { run });
+      if (!wasTerminal && TERMINAL_RUN.has(run.status)) this.#emitAfterWrite("run.end", { run });
     },
 
     cancel: async (id: string, by: string): Promise<void> => {
@@ -646,6 +721,7 @@ export class StoreView implements Store {
         this.#deps.db.transaction(() => {
           const target = this.#getRun(final.runId);
           if (!target) throw new Error(`unknown run "${final.runId}"`);
+          if (TERMINAL_RUN.has(target.status)) return undefined;
           const run: Run = { ...target, status: "cancelled", endedAt: target.endedAt ?? Date.now() };
           this.#writeRun(run);
           return run;
@@ -655,7 +731,7 @@ export class StoreView implements Store {
         if (res.denied) throw denialError(res.denied);
         return;
       }
-      this.#emitAfterWrite("run.end", { run: res.value as Run });
+      if (res.value) this.#emitAfterWrite("run.end", { run: res.value });
     },
   };
 
@@ -802,9 +878,14 @@ class DbPartWriter implements PartWriter {
   readonly #messageId: string;
   /** null for parts that are written whole (compaction, file, notice) and never receive deltas. */
   readonly #kind: "text" | "reasoning" | "tool-output" | null;
+  readonly #idx: number;
+  readonly #createdAt: number;
   #data: PartData;
+  #updatedAt: number;
   #closed = false;
+  #dirty = false;
   #lastFlush = Date.now();
+  #timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(deps: StoreDeps, caller: Caller, part: Part, sessionId: string) {
     this.#deps = deps;
@@ -812,6 +893,9 @@ class DbPartWriter implements PartWriter {
     this.partId = part.id;
     this.#messageId = part.messageId;
     this.#sessionId = sessionId;
+    this.#idx = part.idx;
+    this.#createdAt = part.createdAt;
+    this.#updatedAt = part.updatedAt;
     this.#data = part.data;
     this.#kind =
       part.data.type === "text"
@@ -845,8 +929,10 @@ class DbPartWriter implements PartWriter {
       delta,
       offset,
     });
+    this.#dirty = true;
     const now = Date.now();
     if (now - this.#lastFlush >= PART_CHECKPOINT_MS) this.#flush(now);
+    else this.#armCheckpoint();
   }
 
   replace(data: PartData): void {
@@ -863,35 +949,69 @@ class DbPartWriter implements PartWriter {
     if (final !== undefined) this.#deps.partTypes.check(final, this.#caller.plugin);
     if (final !== undefined) this.#data = final;
     this.#closed = true;
+    this.#clearTimer();
+    this.#dirty = false;
     this.#deps.liveParts.delete(this.partId);
     const now = Date.now();
-    this.#deps.db
-      .query("UPDATE parts SET status = ?, data = ?, updated_at = ? WHERE id = ?")
-      .run(status, JSON.stringify(this.#data), now, this.partId);
+    this.#updatedAt = now;
     this.#lastFlush = now;
+    if (!this.#deps.closed) {
+      this.#deps.db
+        .query("UPDATE parts SET status = ?, type = ?, data = ?, updated_at = ? WHERE id = ?")
+        .run(status, this.#data.type, JSON.stringify(this.#data), now, this.partId);
+    }
     this.#publish(status);
   }
 
   /** Whole-part update for clients that don't stream deltas (compaction markers). */
   #publish(status: "streaming" | "complete" | "error" | "interrupted"): void {
+    const part: Part = {
+      id: this.partId,
+      messageId: this.#messageId,
+      idx: this.#idx,
+      status,
+      type: this.#data.type,
+      data: this.#data,
+      createdAt: this.#createdAt,
+      updatedAt: this.#updatedAt,
+    };
     this.#deps.bus.signalAs(this.#caller, "part.update", {
       sessionId: this.#sessionId,
       messageId: this.#messageId,
-      part: {
-        id: this.partId,
-        messageId: this.#messageId,
-        status,
-        type: this.#data.type,
-        data: this.#data,
-      },
+      part,
     });
   }
 
+  #armCheckpoint(): void {
+    if (this.#timer !== undefined || this.#closed || this.#deps.closed) return;
+    const timer = setTimeout(() => {
+      this.#timer = undefined;
+      if (this.#closed || this.#deps.closed || !this.#dirty) return;
+      try {
+        this.#flush();
+      } catch (error) {
+        this.#deps.logger.warn("part checkpoint failed", { partId: this.partId, error });
+      }
+    }, PART_CHECKPOINT_MS);
+    timer.unref();
+    this.#timer = timer;
+  }
+
+  #clearTimer(): void {
+    if (this.#timer === undefined) return;
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+
   #flush(now = Date.now()): void {
-    this.#deps.db
-      .query("UPDATE parts SET data = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(this.#data), now, this.partId);
+    this.#clearTimer();
+    this.#dirty = false;
     this.#lastFlush = now;
+    this.#updatedAt = now;
+    if (this.#closed || this.#deps.closed) return;
+    this.#deps.db
+      .query("UPDATE parts SET type = ?, data = ?, updated_at = ? WHERE id = ?")
+      .run(this.#data.type, JSON.stringify(this.#data), now, this.partId);
   }
 }
 
@@ -929,10 +1049,21 @@ export function createStore(deps: StoreDeps): CoreStore {
           .query("UPDATE messages SET status = 'interrupted', updated_at = ? WHERE status = 'streaming'")
           .run(now);
         deps.db
-          .query("UPDATE parts SET status = 'interrupted', updated_at = ? WHERE status = 'streaming'")
+          .query(
+            `UPDATE parts SET status = 'interrupted', updated_at = ?,
+               data = CASE
+                 WHEN type = 'tool-call' AND json_extract(data, '$.status') IN ('pending', 'running')
+                 THEN json_set(data, '$.status', 'cancelled')
+                 ELSE data
+               END
+             WHERE status = 'streaming'`,
+          )
           .run(now);
         return rows.map((row) => ({ ...rowToRun(row), status: "interrupted" as const, endedAt: now }));
       })(),
-    close: () => deps.db.close(),
+    close: () => {
+      deps.closed = true;
+      deps.db.close();
+    },
   };
 }
