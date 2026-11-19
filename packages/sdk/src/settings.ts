@@ -25,7 +25,7 @@ export interface SettingsSchemaHints {
 }
 
 /** Group a settings page is listed under. */
-export type SettingsGroup = "models" | "providers" | "tools" | "system";
+export type SettingsGroup = "system" | "inference" | "tools";
 
 export interface SettingsPageInfo {
   title: string;
@@ -39,7 +39,7 @@ export interface SettingsPageInfo {
 
 /**
  * Hints on the root of a configSchema. Without `x-group` a UI derives one from the manifest's `provides`:
- * inference providers under "providers", tool-only plugins under "tools", the rest under "system".
+ * inference providers under "inference", tool-only plugins under "tools", the rest under "system".
  */
 export interface SettingsRootHints {
   "x-group"?: SettingsGroup;
