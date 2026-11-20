@@ -4,11 +4,9 @@ import { join } from "node:path";
 import {
   type ControlServer,
   createControlServer,
-  layer,
   patchOverlay,
-  sourcesOf,
   type ValetKernel,
-  withDefaults,
+  withEnabled,
 } from "@valethq/core";
 import { bootFx, fxRoot, FX } from "./helpers";
 
@@ -47,15 +45,15 @@ describe("settings layering", () => {
     );
     expect(live().ctx.config).toEqual({ mode: "b", level: 3, label: "ui" });
     expect(doc(kernel, "fx-set")?.sources).toEqual({ mode: "file", level: "default", label: "settings" });
+    expect(doc(kernel, "fx-set")?.layers).toEqual({
+      file: { mode: "b", label: "file" },
+      user: { label: "ui" },
+    });
+    expect(doc(kernel, "fx-set")?.liveConfig).toBe(true);
+    expect(doc(kernel, "fx-cold")?.liveConfig).toBe(false);
   });
 
   test("pure helpers", () => {
-    const schema = { properties: { a: { default: [1] }, b: { type: "string" } } };
-    const filled = withDefaults(schema, {});
-    expect(filled).toEqual({ a: [1] });
-    (filled.a as number[]).push(2);
-    expect(withDefaults(schema, {})).toEqual({ a: [1] });
-    expect(sourcesOf(schema, { b: "x" }, { a: [2] })).toEqual({ a: "settings", b: "file" });
     const overlay = patchOverlay(
       { plugins: { p: { config: { a: 1, b: 2 } } } },
       "p",
@@ -72,9 +70,9 @@ describe("settings layering", () => {
       scopes: {},
       plugins: { p: { config: { a: 1 } } },
     };
-    expect(layer(file, { plugins: { p: { enabled: false, config: { b: 2 } } } }).plugins.p).toEqual({
+    expect(withEnabled(file, { plugins: { p: { enabled: false, config: { b: 2 } } } }).plugins.p).toEqual({
       enabled: false,
-      config: { a: 1, b: 2 },
+      config: { a: 1 },
     });
   });
 });
@@ -101,13 +99,29 @@ describe("updateSettings", () => {
     expect(live().ctx.config.level).toBe(3);
   });
 
-  test("a throwing listener rejects the save", async () => {
+  test("a throwing listener keeps the save; the plugin keeps its applied config", async () => {
     const { kernel, home } = await up();
-    await expect(kernel.updateSettings("fx-set", { config: { reject: true } })).rejects.toThrow(
-      "refused by plugin",
+    const res = await kernel.updateSettings("fx-set", { config: { reject: true } });
+    expect(res.restartRequired).toBe("refused by plugin");
+    expect(res.values.reject).toBe(true);
+    expect(readSettings(home).plugins["fx-set"].config).toEqual({ reject: true });
+    expect(live().ctx.config.reject).toBeUndefined();
+    const fixed = await kernel.updateSettings("fx-set", { config: { reject: null } });
+    expect(fixed.restartRequired).toBeUndefined();
+  });
+
+  test("onConfigCheck vetoes the save before anything is written", async () => {
+    const { kernel, home } = await up();
+    await expect(kernel.updateSettings("fx-set", { config: { veto: true } })).rejects.toThrow(
+      "vetoed by plugin",
     );
     expect(existsSync(join(home, "settings.json"))).toBe(false);
-    expect(live().ctx.config.reject).toBeUndefined();
+    expect(live().ctx.config.veto).toBeUndefined();
+  });
+
+  test("{ enabled: false } skips config validation", async () => {
+    const { kernel } = await up();
+    expect((await kernel.updateSettings("fx-set", { enabled: false })).enabled).toBe(false);
   });
 
   test("a plugin with no listener saves and asks for a restart", async () => {
@@ -172,7 +186,12 @@ describe("control plane", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { values: { mode: string } }).values.mode).toBe("b");
     expect((await call("PATCH", "/settings/fx-set", { config: { level: 0 } })).status).toBe(400);
-    expect((await call("PATCH", "/settings/fx-set", { config: { reject: true } })).status).toBe(422);
+    const bad = await call("PATCH", "/settings/fx-set", { config: { level: 0 } });
+    expect(((await bad.json()) as { error: { errors: Record<string, string> } }).error.errors).toEqual({
+      level: "must be at least 1",
+    });
+    expect((await call("PATCH", "/settings/fx-set", { config: { veto: true } })).status).toBe(422);
+    expect((await call("PATCH", "/settings/fx-set", { scope: "team" })).status).toBe(400);
     expect((await call("PATCH", "/settings/missing", { config: {} })).status).toBe(404);
     expect((await call("PATCH", "/settings/fx-set", { config: [] })).status).toBe(400);
   });

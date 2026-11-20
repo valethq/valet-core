@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { expandHome } from "./paths";
 
 /** Section 12: ~/.valet/config.json, with VALET_HOME overriding the location. */
 export interface ValetConfig {
@@ -34,11 +35,6 @@ export function defaultConfig(valetHome: string): ValetConfig {
     plugins: {},
     scopes: {},
   };
-}
-
-function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
 /** Structural equality for config values (key order ignored). */

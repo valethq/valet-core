@@ -42,7 +42,7 @@ const SECRET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export const isSecretName = (name: string): boolean => SECRET_NAME.test(name);
 
-const envName = (name: string): string => name.toUpperCase().replaceAll("-", "_");
+export const envName = (name: string): string => name.toUpperCase().replaceAll("-", "_");
 
 /** Where a secret resolves from, without its value (12.2). */
 export function secretSource(valetHome: string, name: string): "file" | "env" | null {

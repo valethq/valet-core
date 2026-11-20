@@ -5,7 +5,7 @@ import { createControlServer } from "./control/index";
 import { boot } from "./kernel";
 import { discoverPlugins, resolvePlugins } from "./loader";
 import { createLogger } from "./log";
-import { layer, loadOverlay } from "./settings";
+import { buildModel, loadOverlay, withEnabled } from "./settings/index";
 
 function flagValue(args: string[], name: string): string | undefined {
   const at = args.indexOf(name);
@@ -67,9 +67,16 @@ function doctor(args: string[]): number {
     console.log(`config: ${configPath}`);
     console.log(`valet home: ${valetHome}`);
     const silent = createLogger({ out: () => {} });
-    const config = layer(fileConfig, loadOverlay(valetHome));
+    const config = withEnabled(fileConfig, loadOverlay(valetHome));
     const records = discoverPlugins(config, silent);
-    resolvePlugins(records, config, silent);
+    resolvePlugins(records, config, silent, (rec) => {
+      try {
+        if (rec.manifest) buildModel(rec.manifest);
+        return undefined;
+      } catch (error) {
+        return (error as Error).message;
+      }
+    });
     if (records.length === 0) {
       console.log("plugins: none discovered");
       return 0;

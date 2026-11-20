@@ -10,7 +10,7 @@ import {
 } from "@valethq/sdk";
 import { type PluginSettings, type PluginStatus, type ReloadResult, SettingsError } from "../kernel";
 import { deleteSecret, isSecretName, listSecretFiles, secretSource, writeSecret } from "../secrets";
-import type { SettingsPatch } from "../settings";
+import type { SettingsPatch } from "../settings/overlay";
 import { ProjectInUseError } from "../store/store";
 import { FsError, listDirs, makeDir, normalizeDir } from "./fs";
 import { matchSegments, splitPath } from "./router";
@@ -67,7 +67,12 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
       );
     }
     if (error instanceof SettingsError)
-      return errorJson(error.status, error.status === 404 ? "not_found" : "bad_request", error.message);
+      return errorJson(
+        error.status,
+        error.status === 404 ? "not_found" : error.status === 422 ? "refused" : "bad_request",
+        error.message,
+        error.errors === undefined ? {} : { errors: error.errors },
+      );
     if (error instanceof ProjectInUseError)
       return errorJson(409, "in_use", error.message, { sessions: error.sessions });
     const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +81,9 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
     throw error;
   }
 }
+
+const projectParam = (req: Request): string | undefined =>
+  new URL(req.url).searchParams.get("project") ?? undefined;
 
 async function body(req: Request): Promise<Record<string, unknown>> {
   const text = await req.text();
@@ -116,7 +124,7 @@ function parseFiniteQuery(v: string | null, name: string): QueryNum {
 export interface RestDeps {
   plugins(): PluginStatus[];
   reload(): Promise<ReloadResult>;
-  settings(): PluginSettings[];
+  settings(project?: string): PluginSettings[];
   updateSettings(plugin: string, patch: SettingsPatch): Promise<PluginSettings>;
   /** Tells plugins a secret was written or removed (the name only). */
   secretChanged(name: string): void;
@@ -327,9 +335,9 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       return json(result, result.ok ? 200 : 400);
     }),
 
-    r("GET", "/settings", async () => json(deps.settings())),
-    r("GET", "/settings/:plugin", async (_req, ctx) => {
-      const found = deps.settings().find((p) => p.plugin === ctx.params.plugin);
+    r("GET", "/settings", async (req) => json(deps.settings(projectParam(req)))),
+    r("GET", "/settings/:plugin", async (req, ctx) => {
+      const found = deps.settings(projectParam(req)).find((p) => p.plugin === ctx.params.plugin);
       return found ? json(found) : errorJson(404, "not_found", "unknown plugin");
     }),
     r("PATCH", "/settings/:plugin", async (req, ctx) => {
@@ -339,7 +347,13 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         return errorJson(400, "bad_request", "config must be an object");
       if (b.enabled !== undefined && typeof b.enabled !== "boolean")
         return errorJson(400, "bad_request", "enabled must be a boolean");
+      if (b.scope !== undefined && b.scope !== "user" && b.scope !== "project")
+        return errorJson(400, "bad_request", 'scope must be "user" or "project"');
+      if (b.project !== undefined && typeof b.project !== "string")
+        return errorJson(400, "bad_request", "project must be a string");
       const patch: SettingsPatch = {
+        ...(b.scope === undefined ? {} : { scope: b.scope as "user" | "project" }),
+        ...(b.project === undefined ? {} : { project: b.project as string }),
         ...(config === undefined ? {} : { config: config as Record<string, unknown> }),
         ...(b.enabled === undefined ? {} : { enabled: b.enabled as boolean }),
       };

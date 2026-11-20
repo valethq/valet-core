@@ -1,3 +1,5 @@
+import type { SettingsDoc } from "./settings";
+
 export interface PluginManifest {
   /** Manifest format version. */
   schema: 1;
@@ -25,7 +27,9 @@ export interface PluginManifest {
   optionalRequires?: string[];
   /** Event namespace this plugin may emit under. Defaults to the id without the "valet-" prefix. */
   events?: { namespace?: string };
-  /** JSON Schema for this plugin's config block; core validates it before activate(). */
+  /** Settings v3 document (12.1): config and settings UI in one. Core compiles it into the config schema. */
+  settings?: SettingsDoc;
+  /** JSON Schema for this plugin's config block when it has no `settings` document; ignored when `settings` is present. */
   configSchema?: Record<string, unknown>;
   /** Reserved for post-v1 permissions. Ignored in v1 (plugins are fully trusted). */
   permissions?: string[];

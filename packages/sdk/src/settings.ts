@@ -1,109 +1,221 @@
 /**
- * Settings (12.1). A plugin's settings are its config: the manifest's `configSchema` describes them, core stores
- * what a UI saves, and `ctx.config` always holds the effective values. The `settings` scope below is for what
- * config can't express: live view blocks, actions, and forms whose values are not config (a password change).
+ * Settings v3 (12.1). A plugin's manifest `settings` document describes its config and its settings UI. Core
+ * compiles it into the schema it validates against, stores what a UI saves in layers, and `ctx.config` holds the
+ * applied values. The `settings@2` scope is for what config can't hold: option and view sources, actions, and
+ * runtime subsections whose values live in the plugin.
  */
 
-/**
- * UI hints a settings schema may carry next to standard JSON Schema (title, description, default, enum,
- * minimum, maximum, readOnly, format "password"). Core ignores them; a UI uses the ones it knows.
- */
-export interface SettingsSchemaHints {
-  /** Labels for `enum` values, in the same order. */
-  enumNames?: string[];
-  /**
-   * A control richer than the type implies. Known to valet-ui: "textarea", "secret" (the value names a secret
-   * the UI can set), "model" (a ModelRef), "models" (valet-agent's model catalog), "segmented".
-   */
-  "x-widget"?: string;
-  /** Kept in the page's collapsed Advanced section. */
-  "x-advanced"?: boolean;
-  /** A heading the field is grouped under on its page. */
-  "x-section"?: string;
-  /** Top-level properties only: show the field on another of the plugin's pages (an `x-pages` id). */
-  "x-page"?: string;
+export type SettingsSection = "system" | "inference" | "tools";
+
+export interface SettingsDoc {
+  sections: Partial<Record<SettingsSection, SectionDoc>>;
+  /** Plugin-local recipes; names start with "local:". */
+  types?: Record<string, InputDef>;
 }
 
-/** Group a settings page is listed under. */
-export type SettingsGroup = "system" | "inference" | "tools";
-
-export interface SettingsPageInfo {
-  title: string;
-  description?: string;
-  group?: SettingsGroup;
-  /** An icon name; UIs map the ones they know. */
+export interface SectionDoc {
   icon?: string;
-  /** Sort key within its group; lower first. */
+  /** Within the section; lower first. */
   order?: number;
+  /** At least one; shown in `order`, then listed order. */
+  subsections: Subsection[];
 }
 
-/**
- * Hints on the root of a configSchema. Without `x-group` a UI derives one from the manifest's `provides`:
- * inference providers under "inference", tool-only plugins under "tools", the rest under "system".
- */
-export interface SettingsRootHints {
-  "x-group"?: SettingsGroup;
-  "x-icon"?: string;
-  "x-order"?: number;
-  /** Extra pages the plugin's settings split into, by id. */
-  "x-pages"?: Record<string, SettingsPageInfo>;
+export interface Subsection {
+  id: string;
+  label: string;
+  summary?: string;
+  order?: number;
+  items: (Setting | Display)[];
 }
+
+export interface Setting {
+  /** Config key. */
+  id: string;
+  label: string;
+  /** One line, under the label. */
+  summary?: string;
+  /** Long help (markdown); falls back to summary. */
+  details?: string;
+  /** Value-bearing; label defaults to the setting's. */
+  input: Input;
+  /** Hide unless true. */
+  when?: Cond;
+  /** Default ["user"]. */
+  scopes?: Scope[];
+  /** UI hint before saving; default "live". */
+  apply?: "live" | "restart";
+  /** Collapsed "Advanced" block on its subsection. */
+  advanced?: boolean;
+  /** Shown on the setting; the setting is hidden unless a layer stores a value. */
+  deprecated?: string;
+  /** For settings search. */
+  keywords?: string[];
+  migrate?: Migration[];
+}
+
+export type Scope = "user" | "project";
+
+export interface InputBase {
+  type: string;
+  /** Required inside a group (its key); unused on a setting's own input. */
+  id?: string;
+  label?: string;
+  summary?: string;
+  /** A group without one takes its inputs' defaults. */
+  default?: unknown;
+  required?: boolean;
+  readonly?: boolean;
+  when?: Cond;
+  /** Which ${...} resolvers this input accepts. */
+  refs?: Resolver[];
+  /** cmd: cache lifetime, ms; default 60000. */
+  ttl?: number;
+}
+
+export type Resolver = "secret" | "file" | "env" | "cmd";
+
+/** An input: a catalog type or a "local:" recipe, with the fields its type understands. */
+export type Input = InputBase & Record<string, unknown>;
+
+/** A recipe: a base type plus fields the base understands. Catalog derived types have the same shape. */
+export type InputDef = { base: string } & Record<string, unknown>;
 
 export type SettingsTone = "normal" | "good" | "warning" | "critical";
 
-/** Declarative view data. The UI owns all rendering; a block carries values, never markup. */
-export type SettingsBlock =
-  | { type: "text"; text: string; tone?: SettingsTone }
-  | { type: "badge"; text: string; tone?: SettingsTone }
-  | { type: "stat"; label: string; value: string; caption?: string }
-  | {
-      type: "meter";
-      label: string;
-      /** Filled share of the bar, 0-100. */
-      value: number;
-      /** Headline text, e.g. "44% left". */
-      display?: string;
-      /** Small line under the headline, e.g. "+56% in 2h 0m". */
-      caption?: string;
-      /** Short status at the top right, e.g. "On pace". */
-      status?: string;
-      /** Marker position on the bar, 0-100 (e.g. where a steady pace would be now). */
-      marker?: number;
-      tone?: SettingsTone;
-    }
-  | { type: "table"; columns: string[]; rows: string[][] }
-  | {
-      type: "button";
-      label: string;
-      /** Key in `SettingsPanel.actions`. */
+/** A view source for display types: the view returns the type's fields, merged over the static ones. */
+export interface FromSource {
+  from?: SourceRef;
+  args?: Record<string, unknown | { $: Path }>;
+}
+
+interface DisplayBase {
+  id?: string;
+  when?: Cond;
+}
+
+/** Display types store nothing. */
+export type Display =
+  | (DisplayBase & { type: "heading"; text: string })
+  | (DisplayBase & { type: "note"; text: string; tone?: SettingsTone })
+  | (DisplayBase & { type: "divider" })
+  | (DisplayBase & { type: "link"; text: string; href: string })
+  | (DisplayBase & FromSource & { type: "badge"; text?: string; tone?: SettingsTone })
+  | (DisplayBase & FromSource & { type: "stat"; label?: string; value?: string; caption?: string })
+  | (DisplayBase &
+      FromSource & {
+        type: "meter";
+        label?: string;
+        /** Filled share of the bar, 0-100. */
+        value?: number;
+        display?: string;
+        caption?: string;
+        status?: string;
+        /** Marker position on the bar, 0-100. */
+        marker?: number;
+        tone?: SettingsTone;
+      })
+  | (DisplayBase & FromSource & { type: "table"; columns?: string[]; rows?: string[][] })
+  | (DisplayBase & {
+      type: "action";
+      text: string;
+      /** Key in the plugin's `settings@2` `actions`. */
       action: string;
-      args?: Record<string, unknown>;
+      args?: Record<string, unknown | { $: Path }>;
       /** Ask for confirmation with this text before running. */
       confirm?: string;
       tone?: SettingsTone;
-    }
-  | { type: "group"; title?: string; layout?: "stack" | "row"; blocks: SettingsBlock[] };
+    });
 
-export type SettingsAction = (args: Record<string, unknown>) => void | Promise<void>;
+export type DisplayType = Display["type"];
 
-/**
- * A panel on the `settings` scope: read-only `view` blocks, actions, an editable form (`schema`, `get`, `set`)
- * for values that are not config, or a mix. It shows on its plugin's settings page, above the config form.
- */
-export interface SettingsPanel {
-  title: string;
+export interface Option {
+  value: string;
+  label?: string;
+  summary?: string;
+  icon?: string;
+  group?: string;
+}
+export type Options = Option[] | { from: SourceRef; args?: Record<string, unknown | { $: Path }> };
+/** "name" (own plugin) or "<pluginId>/name", e.g. "valet-agent/models". */
+export type SourceRef = string;
+
+/** Into stored values: "settingId" or "settingId.key.key"; "@" / "@.key" inside a list item or map value. */
+export type Path = string;
+export type Cond =
+  | { eq: [Path, unknown] }
+  | { ne: [Path, unknown] }
+  | { in: [Path, unknown[]] }
+  | { set: Path }
+  | { not: Cond }
+  | { all: Cond[] }
+  | { any: Cond[] };
+
+export interface Migration {
+  /** Another setting id, or "kv:<key>" (a plugin_kv row); omitted: this setting, in place. */
+  from?: string;
+  /** Value transform; omitted: copy as is. */
+  map?: { template: string } | { scale: number } | { match: string } | { values: Record<string, unknown> };
+}
+
+export type SettingSource = "default" | "file" | "settings" | "project";
+
+/** One plugin's settings as the control plane serves them (12.1). */
+export interface PluginSettings {
+  plugin: string;
+  name?: string;
   description?: string;
-  /** One of the plugin's `x-pages` ids to show on instead of its main page. */
-  page?: string;
-  /** JSON Schema describing the editable values; the UI renders its form from it. */
+  version?: string;
+  provides: string[];
+  state: "active" | "failed" | "disabled" | "pending";
+  enabled: boolean;
+  /** The manifest's doc. */
+  settings?: SettingsDoc;
+  /** Recipe chain for each non-primitive type used. */
+  types?: Record<string, InputDef>;
+  /** The compiled (or raw) configSchema. */
   schema?: Record<string, unknown>;
-  get?(): Record<string, unknown> | Promise<Record<string, unknown>>;
-  /** Applies and persists the values. Throw to reject; the message is shown in the UI. */
-  set?(values: Record<string, unknown>): void | Promise<void>;
-  /** Called on every fetch, so the blocks can reflect current state. */
-  view?(): SettingsBlock[] | Promise<SettingsBlock[]>;
-  /** Re-fetch the panel this often (ms) while it is visible. The UI clamps this to at least 1000. */
+  /** Stored values, migrated and unit-parsed; refs stay raw. */
+  values: Record<string, unknown>;
+  sources: Record<string, SettingSource>;
+  /** Stored, after migration. */
+  layers: {
+    file?: Record<string, unknown>;
+    user?: Record<string, unknown>;
+    project?: Record<string, unknown>;
+  };
+  /** The plugin has an onConfigChange listener. */
+  liveConfig: boolean;
+  /** Ref failures and permission warnings. */
+  issues?: Record<Path, string>;
+  /** Scrubbed: resolved ref values replaced by their ${...} text. */
+  restartRequired?: string;
+}
+
+/** The `settings@2` scope (many, one provider per plugin, keyed by plugin id). Core never calls it. */
+export interface SettingsContribution {
+  options?: Record<string, (args: Record<string, unknown>) => Option[] | Promise<Option[]>>;
+  /** Display type's fields. */
+  views?: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>>;
+  actions?: Record<string, (args: Record<string, unknown>) => void | Promise<void>>;
+  subsections?: () => RuntimeSubsection[] | Promise<RuntimeSubsection[]>;
+}
+
+/** Not config: values live in the plugin (a password change). Core neither stores nor validates them. */
+export interface RuntimeSubsection {
+  id: string;
+  label: string;
+  summary?: string;
+  order?: number;
+  /** Which of the plugin's sections it shows on; default the first in its doc. */
+  section?: SettingsSection;
+  items: (PanelField | Display)[];
   refreshMs?: number;
-  /** Handlers for `button` blocks. Throw to report an error in the UI. */
-  actions?: Record<string, SettingsAction>;
+  get?(): Record<string, unknown> | Promise<Record<string, unknown>>;
+  set?(values: Record<string, unknown>): void | Promise<void>;
+}
+
+/** A setting without config semantics: no scopes, migrate, refs or apply. `masked` strings never echo the stored value back. */
+export interface PanelField extends Omit<Setting, "input" | "scopes" | "migrate" | "apply"> {
+  input: Omit<InputBase, "refs" | "ttl"> & Record<string, unknown>;
 }

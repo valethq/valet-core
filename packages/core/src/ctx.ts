@@ -6,15 +6,22 @@ import type { HttpRegistry, WsRegistry } from "./hosts";
 import type { CoreLogger } from "./log";
 import { createSecrets } from "./secrets";
 import type { CoreScopes } from "./scopes";
+import type { ConfigHooks } from "./settings/service";
 import type { OpenedStore } from "./store";
 
 export interface PluginRuntime {
   readonly ctx: PluginContext;
   readonly abort: AbortController;
-  /** Swaps the config and runs the plugin's listeners. False when it has none; a throwing listener restores the old config. */
-  applyConfig(next: Record<string, unknown>): Promise<boolean>;
+  /** The plugin's onConfigCheck / onConfigChange registrations, for the settings service. */
+  readonly hooks: ConfigHooks;
   /** Runs onDispose fns (reverse registration order), then disposes every registered view. */
   dispose(): Promise<void>;
+}
+
+/** Where ctx.config and ctx.configFor read from (the settings service). */
+export interface ConfigSource {
+  read(): Record<string, unknown>;
+  readFor(projectId: string): Record<string, unknown>;
 }
 
 export interface CtxDeps {
@@ -31,7 +38,7 @@ export interface CtxDeps {
 export function buildPluginContext(
   deps: CtxDeps,
   plugin: { id: string; version: string; dir: string; manifest: PluginManifest },
-  config: Record<string, unknown>,
+  config: ConfigSource,
 ): PluginRuntime {
   const namespace = plugin.manifest.events?.namespace ?? plugin.id.replace(/^valet-/, "");
   const log = deps.log.forPlugin(plugin.id);
@@ -41,11 +48,9 @@ export function buildPluginContext(
   const ws = deps.ws.forPlugin(plugin.id, namespace);
   const abort = new AbortController();
   const onDispose: (() => void | Promise<void>)[] = [];
-  const configListeners: ((
-    next: Record<string, unknown>,
-    prev: Record<string, unknown>,
-  ) => void | Promise<void>)[] = [];
-  let current = config;
+  type ConfigFn = (next: Record<string, unknown>, prev: Record<string, unknown>) => void | Promise<void>;
+  const configListeners: ConfigFn[] = [];
+  const configChecks: ConfigFn[] = [];
 
   deps.store.setOrigin({
     id: plugin.id,
@@ -60,10 +65,16 @@ export function buildPluginContext(
   const ctx: PluginContext = {
     plugin: { id: plugin.id, version: plugin.version, dir: plugin.dir, manifest: plugin.manifest },
     get config() {
-      return current;
+      return config.read();
+    },
+    configFor(projectId) {
+      return config.readFor(projectId);
+    },
+    onConfigCheck(fn) {
+      configChecks.push(fn as ConfigFn);
     },
     onConfigChange(fn) {
-      configListeners.push(fn as (typeof configListeners)[number]);
+      configListeners.push(fn as ConfigFn);
     },
     log,
     events,
@@ -83,17 +94,14 @@ export function buildPluginContext(
   return {
     ctx,
     abort,
-    async applyConfig(next) {
-      if (configListeners.length === 0) return false;
-      const prev = current;
-      current = next;
-      try {
+    hooks: {
+      listeners: () => configListeners.length,
+      async runChecks(next, prev) {
+        for (const fn of configChecks) await fn(next, prev);
+      },
+      async runListeners(next, prev) {
         for (const fn of configListeners) await fn(next, prev);
-      } catch (error) {
-        current = prev;
-        throw error;
-      }
-      return true;
+      },
     },
     async dispose() {
       for (const fn of onDispose.reverse()) {
