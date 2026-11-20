@@ -238,6 +238,27 @@ describe("settings v3: saves", () => {
     expect(kernel.settingsService.cmd.peek("${cmd:printf a}")).toBeUndefined();
   });
 
+  test("readonly inputs inside list items and map values can't change; added items are free", async () => {
+    const { kernel } = await up({
+      config: { servers: [{ name: "a", region: "eu" }], pinned: { a: "1" } },
+    });
+    const save = (config: Cfg) => errorsOf(kernel.updateSettings("fx-v3", { config }));
+    expect(await save({ servers: [{ name: "a", region: "us" }] })).toEqual({
+      "servers[0].region": "readonly",
+    });
+    expect(await save({ pinned: { a: "2" } })).toEqual({ 'pinned["a"]': "readonly" });
+    await kernel.updateSettings("fx-v3", {
+      config: {
+        servers: [
+          { name: "a", region: "eu" },
+          { name: "b", region: "us" },
+        ],
+        pinned: { a: "1", b: "2" },
+      },
+    });
+    expect(v3().ctx.config.pinned).toEqual({ a: "1", b: "2" });
+  });
+
   test("onConfigCheck vetoes with 422 and nothing is written", async () => {
     const { kernel, home } = await up();
     await expect(kernel.updateSettings("fx-v3", { config: { header: "veto" } })).rejects.toMatchObject({

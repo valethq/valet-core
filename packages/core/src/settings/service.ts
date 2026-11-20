@@ -912,4 +912,14 @@ function readonlyDiff(node: Node, before: unknown, after: unknown, path: string,
     const a = isRecord(after) ? after[id] : undefined;
     readonlyDiff(c, b, a, `${path}.${id}`, errors);
   }
+  // spec-gap: list items match by position, map values by key; an item on only one side is not checked.
+  if (node.item && Array.isArray(before) && Array.isArray(after)) {
+    const n = Math.min(before.length, after.length);
+    for (let i = 0; i < n; i++) readonlyDiff(node.item, before[i], after[i], `${path}[${i}]`, errors);
+  }
+  if (node.value && isRecord(before) && isRecord(after)) {
+    for (const k of Object.keys(before))
+      if (Object.hasOwn(after, k))
+        readonlyDiff(node.value, before[k], after[k], `${path}[${JSON.stringify(k)}]`, errors);
+  }
 }
