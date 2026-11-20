@@ -209,6 +209,17 @@ describe("settings v3: saves", () => {
     }
   });
 
+  test("an unset list item stays in place as null, whether its ref failed or its cmd is still running", async () => {
+    const { kernel } = await up({ config: { extra: ["a", "${env:FX_NOPE}", "c"] } });
+    expect(v3().ctx.config.extra).toEqual(["a", null, "c"]);
+    expect(docOf(kernel)?.issues?.["extra[1]"]).toContain("${env:FX_NOPE} is not set");
+    await kernel.updateSettings("fx-v3", { config: { extra: ["a", "${cmd:printf b}", "c"] } });
+    expect(v3().ctx.config.extra).toEqual(["a", null, "c"]);
+    await kernel.settingsService.cmd.settle();
+    await kernel.settingsService.enqueue(async () => {});
+    expect(v3().ctx.config.extra).toEqual(["a", "b", "c"]);
+  });
+
   test("onConfigCheck vetoes with 422 and nothing is written", async () => {
     const { kernel, home } = await up();
     await expect(kernel.updateSettings("fx-v3", { config: { header: "veto" } })).rejects.toMatchObject({

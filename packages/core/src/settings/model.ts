@@ -318,7 +318,6 @@ export function fillPending(
   const live = pending.filter((p) => !skip.has(p.key));
   if (live.length === 0) return block;
   const out: Block = { ...block };
-  const holes = new Set<unknown[]>();
   for (const p of live) {
     const where = [p.key, ...p.path]
       .map((s) => (typeof s === "number" ? `[${s}]` : `.${s}`))
@@ -339,18 +338,13 @@ export function fillPending(
       issues[where] = (e as Error).message;
       missing = true;
     }
-    const holder = setIn(out, [p.key, ...p.path], missing ? DROP : value);
-    if (holder) holes.add(holder);
-  }
-  for (const arr of holes) {
-    const kept = arr.filter((v) => v !== undefined);
-    arr.splice(0, arr.length, ...kept);
+    setIn(out, [p.key, ...p.path], missing ? DROP : value);
   }
   return out;
 }
 
-/** Copy-on-write set along a path; DROP removes the entry. Returns the array left with a hole, if any. */
-function setIn(root: Block, path: (string | number)[], value: unknown): unknown[] | undefined {
+/** Copy-on-write set along a path; DROP removes an object entry and leaves null in a list, so indices hold. */
+function setIn(root: Block, path: (string | number)[], value: unknown): void {
   let parent: Block | unknown[] = root;
   for (let i = 0; i < path.length - 1; i++) {
     const k = path[i] as string | number;
@@ -360,15 +354,12 @@ function setIn(root: Block, path: (string | number)[], value: unknown): unknown[
       : isRecord(child)
         ? { ...child }
         : undefined;
-    if (copy === undefined) return undefined;
+    if (copy === undefined) return;
     (parent as Record<string | number, unknown>)[k] = copy;
     parent = copy;
   }
   const last = path[path.length - 1] as string | number;
   if (value !== DROP) (parent as Record<string | number, unknown>)[last] = value;
-  else if (Array.isArray(parent)) {
-    parent[last as number] = undefined;
-    return parent;
-  } else delete (parent as Block)[last as string];
-  return undefined;
+  else if (Array.isArray(parent)) parent[last as number] = null;
+  else delete (parent as Block)[last as string];
 }

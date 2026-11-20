@@ -4,7 +4,7 @@ import { isLeaf } from "./doc";
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Removes a leaf from its parent when returned from a `mapLeaves` callback. */
+/** Removes a leaf from its parent object (a list keeps the slot as null) when returned from `mapLeaves`. */
 export const DROP = Symbol("drop");
 
 export type LeafFn = (node: Node, value: unknown, path: string) => unknown;
@@ -42,9 +42,10 @@ export function mapLeaves(node: Node, value: unknown, path: string, fn: LeafFn):
   const kids = childrenOf(node, value, path);
   if (Array.isArray(value)) {
     const out: unknown[] = [];
+    // spec-gap: an unset list item stays as null, so indices don't shift under the plugin.
     for (const [n, v, p] of kids) {
       const r = mapLeaves(n, v, p, fn);
-      if (r !== DROP) out.push(r);
+      out.push(r === DROP ? null : r);
     }
     return out;
   }
