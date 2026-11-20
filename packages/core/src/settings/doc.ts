@@ -148,7 +148,8 @@ export function compileDoc(doc: unknown): CompiledDoc {
       }
       case "map": {
         const key = compileInput(f.key ?? { type: "string" }, `${at}.key`);
-        const value = compileInput(f.value, `${at}.value`);
+        // A map without `value` is a free-form object (arbitrary JSON keys and values).
+        const value = f.value === undefined ? undefined : compileInput(f.value, `${at}.value`);
         if (key && key.info.kind !== "string") err(at, "a map key must be string-stored");
         if (key && key.refs.length > 0) err(at, "a map key takes no refs");
         if (key) node.key = key;
