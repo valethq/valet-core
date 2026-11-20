@@ -34,7 +34,12 @@ const NO_VALUE = Symbol("no value");
 
 function transform(map: Migration["map"], old: unknown): unknown {
   if (map === undefined) return old;
-  if ("template" in map) return typeof old === "string" ? map.template.replaceAll("{}", old) : NO_VALUE;
+  if ("template" in map) {
+    if (typeof old !== "string") return NO_VALUE;
+    // A blank or whitespace-only old name yields nothing usable: drop it so the input's default fires.
+    const trimmed = old.trim();
+    return trimmed === "" ? NO_VALUE : map.template.replaceAll("{}", trimmed);
+  }
   if ("scale" in map) return typeof old === "number" ? old * map.scale : NO_VALUE;
   if ("match" in map) {
     if (typeof old !== "string") return NO_VALUE;
