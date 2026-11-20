@@ -1,5 +1,7 @@
 import type { InputDef, PluginManifest, Scope, SettingsDoc } from "@valethq/sdk";
+import { isAbsolute } from "node:path";
 import { validateAt } from "../jsonschema";
+import { expandHome } from "../paths";
 import { typeChains } from "./catalog";
 import { compileDocSchema, compileNode } from "./compile";
 import { requiredErrors } from "./cond";
@@ -262,6 +264,7 @@ export function resolveBlock(model: Model, values: Block, resolve: StaticResolve
           if (r.warning) res.issues[path] = r.warning;
         } catch (e) {
           failed = (e as Error).message;
+          if (t.resolver === "file" && isAbsolute(expandHome(t.arg))) res.watches.add(expandHome(t.arg));
           break;
         }
       }

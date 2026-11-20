@@ -369,4 +369,20 @@ describe("settings v3: watchers", () => {
     writeFileSync(target, "two", { mode: 0o600 });
     await until(() => v3().ctx.config.header === "two");
   });
+
+  test("a file: ref whose target doesn't exist yet resolves once it is written", async () => {
+    const { kernel, home } = await up({ watch: true });
+    const target = join(home, "later.txt");
+    await kernel.updateSettings("fx-v3", { config: { header: `\${file:${target}}` } });
+    expect(v3().ctx.config.header).toBeUndefined();
+    writeFileSync(target, "now", { mode: 0o600 });
+    await until(() => v3().ctx.config.header === "now");
+  });
+
+  test("a plugin whose only secret ref failed picks the secret up once it is written", async () => {
+    const { home } = await up({ watch: true, config: { apiKey: "${secret:later_key}" } });
+    expect(v3().ctx.config.apiKey).toBeUndefined();
+    secret(home, "later_key", "late");
+    await until(() => v3().ctx.config.apiKey === "late");
+  });
 });

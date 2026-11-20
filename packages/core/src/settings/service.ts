@@ -494,7 +494,7 @@ export class SettingsService {
     const changed: string[] = [];
     const restart: string[] = [];
     for (const e of this.entries.values()) {
-      if (e.model === undefined || e.desired.res.resolved.size === 0) continue;
+      if (e.model === undefined || !hasStaticRefs(e.desired.res)) continue;
       const res = resolveBlock(e.model, e.desired.values, this.resolver);
       if (Object.keys(res.fatal).length > 0) {
         e.issues = { ...res.issues, ...res.fatal };
@@ -870,6 +870,13 @@ export class SettingsService {
     }
   }
 }
+
+/** Whether a block resolved, watched or failed any `secret:`/`file:`/`env:` ref (a failed one is an issue). */
+const hasStaticRefs = (res: ResolveResult) =>
+  res.resolved.size > 0 ||
+  res.watches.size > 0 ||
+  Object.keys(res.issues).length > 0 ||
+  Object.keys(res.fatal).length > 0;
 
 const under = (path: string, key: string) =>
   path === key || path.startsWith(`${key}.`) || path.startsWith(`${key}[`);
