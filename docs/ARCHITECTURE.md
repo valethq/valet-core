@@ -609,7 +609,7 @@ The bus is in memory and ephemeral. Durable facts go through the store, and the 
 
 | Event | Payload (abridged) | Typical hooks |
 |---|---|---|
-| `project.create` / `project.update` | `{ project }` | |
+| `project.create` / `project.update` / `project.delete` | `{ project }` | |
 | `session.create` / `session.update` / `session.delete` | `{ session }`, `{ session, patch }` | UI list refresh |
 | `message.create` | `{ message, parts }` | before: slash commands (`/model`, `/compact`, `/new`), role policy. after: `valet-agent` queues a run for user messages. |
 | `message.complete` | `{ message }` (status changes to `complete`, `error` or `interrupted`) | after: platform delivery |
@@ -746,7 +746,9 @@ export interface Store {
     get(id: string): Project | undefined;
     list(): Project[];
     create(p: Pick<Project, "name" | "workspaceDir"> & { settings?: Project["settings"] }): Promise<Project | CancelledResult>;
-    update(id: string, patch: Partial<Pick<Project, "name" | "settings">>): Promise<Project | CancelledResult>;
+    update(id: string, patch: Partial<Pick<Project, "name" | "workspaceDir" | "settings">>): Promise<Project | CancelledResult>;
+    /** Unregisters the project; refuses while it still has sessions. Never touches the directory. */
+    delete(id: string): Promise<Project | CancelledResult>;
   };
   sessions: {
     get(id: string): Session | undefined;
@@ -873,6 +875,17 @@ export interface PartTypes {
 - **Rendering.** A client renders kinds it knows its own way, keyed by id and major. For anything else it shows a collapsed block with `title`, expanding to `text`, the kind and its origin (plugin, version, repository, and whether it is loaded), with raw `data` behind a second expander. `view` hints refine that block. Custom parts take `replace()`, not deltas.
 - **Messages.** A message of a custom type is a message holding one custom part. A `system` message holding a part whose type `wakes` is a notification: valet-agent runs on it under its author's role. Only plugins can post one, since a control-plane caller owns no part types.
 
+### 9.5 Registering, relocating and deleting projects
+
+A project points at a directory; it does not own it. Registering, relocating and deleting a project change the `projects` row and nothing on disk. The REST routes below validate paths before calling the `Store`.
+
+- **Paths.** A `workspaceDir` arriving over REST is trimmed, and a leading `~` or `~/` expands to the home directory of the user valet runs as. It must then be absolute, or the request fails with 400 `bad_request`. Core resolves `.`, `..` and trailing slashes, then follows symlinks to the real path, and that real path is what it stores. A path that doesn't exist is 404 `not_found`, and one that isn't a directory is 400 `bad_request`. Core never creates the directory here: a client that wants a new folder calls `POST /api/core/fs/mkdir` first (10.4).
+- **One project per directory.** No two projects share a `workspaceDir`. Registering or relocating onto a directory another project already has fails with 409 `conflict`, and the error carries that project's `projectId`. The comparison is exact on the stored real path, so a directory inside another project's directory is allowed.
+- **Register.** `POST /api/core/projects` takes `{ workspaceDir, name?, settings? }`. `name` defaults to the directory's last segment when it is missing or blank. Success is 201 with the project, through the `project.create` action.
+- **Relocate.** `PATCH /api/core/projects/:id` accepts `workspaceDir` beside `name` and `settings`, and relocating is a `project.update` whose payload carries the new `workspaceDir`. Nothing is moved or copied: the files stay where they are, and the project now points at the new directory. Sessions, their `provider_state` and running jobs are left as they are.
+- **Delete.** `DELETE /api/core/projects/:id` runs the `project.delete` action with `{ project }`. A project that still has sessions, of any status including `archived`, is refused with 409 `in_use`, and the error carries `sessions`, the count. Delete them first (`DELETE /api/core/sessions/:id`). The check runs inside the write's transaction, after the `before` hooks, so a `before` hook may see a delete that then fails, and `after` fires only when the row is gone. On success the response is 200 with the deleted project. The workspace directory and its files are never touched, and plugin-owned rows or files that mention the project id are not cleaned up.
+- **Errors.** Each failure is `{ error: { code, message, ...extra } }`, as on every core route. An unknown project id is 404 `not_found`.
+
 ## 10. HTTP and WebSocket host (control plane)
 
 There is one `Bun.serve` instance, default `127.0.0.1:7417`. It is the **control plane**: the API for controlling valet itself. That means core REST, the WS protocol and plugin control routes (such as `valet-devin`'s MCP endpoint and webhooks). It serves no HTML, no static files and no SPA. A UI is a client of this API, like the CLI and scripts, and it runs its own server on its own port (`valet-ui`, section 11.5).
@@ -881,7 +894,7 @@ There is one `Bun.serve` instance, default `127.0.0.1:7417`. It is the **control
 
 | Path | Owner |
 |---|---|
-| `/api/core/*` | Core REST: projects, sessions, messages, runs (cancel), principals, plugins, blobs |
+| `/api/core/*` | Core REST: projects, sessions, messages, runs (cancel), principals, plugins, blobs, folder browsing (10.4) |
 | `/ws` | Core WebSocket, multiplexed (10.3) |
 | `/plugins/<plugin-id>/*` | Plugin control routes mounted via `ctx.http`: JSON, MCP, webhooks |
 | `/` | A JSON status document `{ name, version, plugins }`, and nothing else |
@@ -958,6 +971,23 @@ Core topics:
 - `plugins`: plugin state changes.
 
 Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring buffer of the last 2,000 frames for each topic. A reconnecting tab sends `since` and catches up without a refetch. A tab that has fallen further behind gets `gap` and refetches over REST. That's how a phone that slept through a long exec shows the right state.
+
+### 10.4 Folder browsing
+
+A client registering or relocating a project needs to pick a directory on the valet host. Two core routes let it browse folders and make one. They read and create directories only. They never list files, read file contents or delete anything.
+
+```ts
+export interface DirListing {
+  path: string;                            // the listed directory, absolute and symlink-resolved
+  parent: string | null;                   // null at the filesystem root
+  home: string;                            // home directory of the user valet runs as
+  dirs: { name: string; path: string }[];  // subdirectories only
+}
+```
+
+- **`GET /api/core/fs/list?path=<dir>&hidden=1`** returns a `DirListing`. `path` is optional and defaults to `home`. It goes through the same rules as a `workspaceDir` (9.5): `~` expands, it must be absolute, symlinks resolve, and a missing path is 404 while a file is 400. A directory valet can't read is 400 `bad_request`. `dirs` holds the subdirectories, including symlinks that point at directories (listed under the link's own path, not its target), sorted by name without regard to case. Names starting with `.` are left out unless `hidden=1`.
+- **`POST /api/core/fs/mkdir`** takes `{ parent, name }` and creates one new folder. `parent` must be an existing directory (same rules). `name` is trimmed and must be a single path segment: empty, `.`, `..` and anything containing `/` are 400 `bad_request`. An existing entry with that name is 409 `conflict` and is never overwritten. Success is 201 with `{ path }`.
+- **Access.** Neither route is an action event and neither has its own role check, in keeping with 10.2. Like every core route, each request is a `control.request` first, so the identity plugin's policy decides who may browse; under decision 5 that means owner only. With an admitted caller the routes reach any directory the valet user can read, `/` included. That is intended: browsing is not limited to the home directory or a configured set of roots (Owner, 2026-11-17).
 
 ## 11. How v1 lands as plugins
 
@@ -1141,3 +1171,9 @@ Calls made in draft 2 that Owner can overrule:
 - A deny is a cancel with attribution: existing `cancelled` checks still hold, and `denied` says who refused and why.
 - `restrict()` is checked when a hook subscribes, not on every emit.
 - The UI's default port is 7418.
+
+Calls made with project delete, relocate and folder browsing (2026-11-17) that Owner can overrule:
+
+- Deleting a project with sessions is refused rather than cascading to them (9.5).
+- Deleting or relocating a project never touches files on disk (9.5).
+- Workspace paths are validated, normalized and kept unique at the REST layer; `Store.projects` takes them as given (9.5).
