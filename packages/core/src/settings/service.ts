@@ -770,8 +770,14 @@ export class SettingsService {
       }
     }
     let out = msg;
-    for (const [v, ref] of pairs.sort((a, b) => b[0].length - a[0].length))
-      if (v.length >= 4) out = out.replaceAll(v, ref);
+    for (const [v, ref] of pairs.sort((a, b) => b[0].length - a[0].length)) {
+      if (v === "") continue;
+      // Short values are masked only as whole tokens, so a 2-char secret doesn't mangle every word holding it.
+      out =
+        v.length >= 4
+          ? out.replaceAll(v, ref)
+          : out.replace(new RegExp(`(?<![A-Za-z0-9])${RegExp.escape(v)}(?![A-Za-z0-9])`, "g"), ref);
+    }
     return out;
   }
 

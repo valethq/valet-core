@@ -198,6 +198,17 @@ describe("settings v3: saves", () => {
     }
   });
 
+  test("a short secret is scrubbed as a whole token", async () => {
+    process.env.FX_SHORT = "xyz";
+    try {
+      const { kernel } = await up();
+      const res = await kernel.updateSettings("fx-v3", { config: { header: "boom-${env:FX_SHORT}" } });
+      expect(res.restartRequired).toBe("cannot use boom-${env:FX_SHORT}");
+    } finally {
+      delete process.env.FX_SHORT;
+    }
+  });
+
   test("onConfigCheck vetoes with 422 and nothing is written", async () => {
     const { kernel, home } = await up();
     await expect(kernel.updateSettings("fx-v3", { config: { header: "veto" } })).rejects.toMatchObject({
