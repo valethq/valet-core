@@ -310,7 +310,6 @@ export class SettingsService {
     for (const k of Object.keys(e.file)) sources[k] = "file";
     for (const k of Object.keys(e.user)) sources[k] = "settings";
     for (const k of Object.keys(projValues ?? {})) sources[k] = "project";
-    this.read(e.rec.id);
     const issues: PathErrors = { ...e.issues, ...e.readIssues };
     if (project !== undefined) Object.assign(issues, e.projectIssues.get(project));
     return {

@@ -220,6 +220,14 @@ describe("settings v3: saves", () => {
     expect(v3().ctx.config.extra).toEqual(["a", "b", "c"]);
   });
 
+  test("reading the settings list does not start cmd runs", async () => {
+    const { kernel } = await up();
+    await kernel.updateSettings("fx-v3", { config: { header: "${cmd:printf a}" } });
+    docOf(kernel);
+    await kernel.settingsService.cmd.settle();
+    expect(kernel.settingsService.cmd.peek("${cmd:printf a}")).toBeUndefined();
+  });
+
   test("onConfigCheck vetoes with 422 and nothing is written", async () => {
     const { kernel, home } = await up();
     await expect(kernel.updateSettings("fx-v3", { config: { header: "veto" } })).rejects.toMatchObject({
