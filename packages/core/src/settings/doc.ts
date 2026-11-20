@@ -328,7 +328,8 @@ export function nodeAt(
       if (seg === node.tag) return undefined;
       node = node.cases.flatMap((c) => c.inputs).find((n) => n.input.id === seg);
       if (node === undefined) return null;
-    } else if (node.value || node.item) {
+    } else if (node.value || node.item || node.info.primitive === "map" || node.info.primitive === "list") {
+      // A list item or map member (declared or free-form) is not statically checkable.
       return undefined;
     } else {
       return null;

@@ -94,6 +94,21 @@ describe("document checks", () => {
     expect([...c.settings.keys()]).toEqual(["a"]);
   });
 
+  test("a map without value is a free-form object; members are not statically checkable", () => {
+    const c = compileDoc(
+      doc([
+        { id: "headers", label: "H", input: { type: "map" } },
+        {
+          id: "rows",
+          label: "R",
+          input: { type: "list", item: { type: "map", when: { set: "@.enabled" } } },
+        },
+      ]),
+    );
+    expect([...c.settings.keys()]).toEqual(["headers", "rows"]);
+    expect(c.settings.get("headers")?.node.input.type).toBe("map");
+  });
+
   test("malformed documents list every problem", () => {
     const msg = docErrors(
       doc([
@@ -332,6 +347,12 @@ describe("migration", () => {
           migrate: [{ from: "secret", map: { template: "${secret:{}}" } }],
         },
         {
+          id: "named",
+          label: "N",
+          input: { type: "string" },
+          migrate: [{ from: "bare", map: { template: "prefix:{}" } }],
+        },
+        {
           id: "at",
           label: "A",
           input: { type: "percent" },
@@ -360,6 +381,17 @@ describe("migration", () => {
     expect(r.changed).toBe(true);
     expect(migrateLayer(model, { utility: "" }).layer).toEqual({ utility: { model: "" } });
     expect(migrateLayer(model, { utility: "plain" }).layer).toEqual({ utility: { model: "plain" } });
+  });
+
+  test("ref templates trim names and drop blanks; generic templates substitute verbatim", () => {
+    expect(migrateLayer(model, { secret: "  k  " }).layer).toEqual({ apiKey: "${secret:k}" });
+    const blank = migrateLayer(model, { secret: "   " });
+    expect(blank.layer).toEqual({});
+    expect(blank.warnings.join("\n")).toContain(
+      'secret: value could not be migrated to "apiKey" and was dropped',
+    );
+    expect(migrateLayer(model, { bare: "" }).layer).toEqual({ named: "prefix:" });
+    expect(migrateLayer(model, { bare: " x " }).layer).toEqual({ named: "prefix: x " });
   });
 
   test("triggers are unambiguous: accepted stored forms and new-shape values never migrate", () => {

@@ -36,7 +36,9 @@ function transform(map: Migration["map"], old: unknown): unknown {
   if (map === undefined) return old;
   if ("template" in map) {
     if (typeof old !== "string") return NO_VALUE;
-    // A blank or whitespace-only old name yields nothing usable: drop it so the input's default fires.
+    // Interpolated refs take a name: padding is junk, and a blank arg means nothing to resolve, so the
+    // old value drops and the input's default fires. Generic templates substitute verbatim.
+    if (!map.template.includes("${")) return map.template.replaceAll("{}", old);
     const trimmed = old.trim();
     return trimmed === "" ? NO_VALUE : map.template.replaceAll("{}", trimmed);
   }
