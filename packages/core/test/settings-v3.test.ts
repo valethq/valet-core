@@ -394,6 +394,33 @@ describe("migration", () => {
     expect(migrateLayer(model, { bare: " x " }).layer).toEqual({ named: "prefix: x " });
   });
 
+  test.each([
+    "${env:PREFIX}{}",
+    "$${secret:{}}",
+    "${env:PREFIX}$${secret:{}}",
+    "${{}:fixed}",
+    "${unclosed:{}",
+  ])("unrelated or escaped refs substitute verbatim: %s", (template) => {
+    const m = buildModel(
+      manifest(
+        doc([
+          {
+            id: "text",
+            label: "T",
+            input: { type: "string" },
+            migrate: [{ from: "old", map: { template } }],
+          },
+        ]),
+      ),
+    );
+    for (const old of ["", "  suffix  "]) {
+      const result = migrateLayer(m, { old });
+      expect(result.layer).toEqual({ text: template.replaceAll("{}", old) });
+      expect(result.warnings).toEqual(['old: migrated to "text"']);
+    }
+    expect(migrateLayer(m, { old: 42 }).layer).toEqual({});
+  });
+
   test("triggers are unambiguous: accepted stored forms and new-shape values never migrate", () => {
     const r = migrateLayer(model, { utility: { model: "x" }, wait: "5m" });
     expect(r.changed).toBe(false);
