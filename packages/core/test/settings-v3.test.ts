@@ -375,6 +375,13 @@ describe("migration", () => {
     expect(r.warnings.join("\n")).toContain("old: value could not be migrated");
   });
 
+  test("a from key is looked up only among the layer's own keys", () => {
+    const m = buildModel(
+      manifest(doc([{ id: "s", label: "S", input: { type: "string" }, migrate: [{ from: "toString" }] }])),
+    );
+    expect(migrateLayer(m, {})).toMatchObject({ layer: {}, changed: false, warnings: [] });
+  });
+
   test("kv rows move into the layer", () => {
     const r = migrateLayer(model, {}, (k) => (k === "note" ? "hello" : undefined));
     expect(r.layer).toEqual({ note: "hello" });

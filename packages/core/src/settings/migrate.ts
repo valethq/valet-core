@@ -66,19 +66,19 @@ export function migrateLayer(model: Model, layer: Block, kv?: (key: string) => u
         res.kvMoved.push(key);
         source = entry.from;
       } else if (entry.from !== undefined) {
-        if (!(entry.from in out)) continue;
+        if (!Object.hasOwn(out, entry.from)) continue;
         old = out[entry.from];
         delete out[entry.from];
         source = entry.from;
       } else {
-        if (!(id in out)) continue;
+        if (!Object.hasOwn(out, id)) continue;
         old = out[id];
         if (kindOf(old) === cs.node.info.kind || kindOf(old) === "null" || accepts(cs.node, old)) continue;
         delete out[id];
         source = id;
       }
       res.changed = true;
-      if (id in out) {
+      if (Object.hasOwn(out, id)) {
         res.warnings.push(`${source}: dropped, "${id}" already has a value`);
         break;
       }
