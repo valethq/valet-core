@@ -50,6 +50,8 @@ declare module "./events" {
     "part.update": { sessionId: string; messageId: string; part: unknown };
     "run.status": { sessionId: string; runId: string; status: string };
     "core.config.changed": { changed: string[]; restartRequired: string[] };
+    /** A secret file was written or removed through the control plane (12.2); carries the name only. */
+    "core.secrets.changed": { name: string };
     "core.hook.error": { eventName: string; phase: HookPhase; plugin: string | undefined; error: unknown };
   }
 }

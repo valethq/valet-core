@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "fx-d",
+  "name": "fx-d",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "dependencies": {
+    "fx-c": "^0.1.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "fx-hang-import",
+  "name": "fx-hang-import",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts"
+}

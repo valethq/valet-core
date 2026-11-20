@@ -8,7 +8,9 @@ import {
   type Session,
   type Store,
 } from "@valethq/sdk";
-import type { PluginStatus, ReloadResult } from "../kernel";
+import { type PluginSettings, type PluginStatus, type ReloadResult, SettingsError } from "../kernel";
+import { deleteSecret, isSecretName, listSecretFiles, secretSource, writeSecret } from "../secrets";
+import type { SettingsPatch } from "../settings";
 import { ProjectInUseError } from "../store/store";
 import { FsError, listDirs, makeDir, normalizeDir } from "./fs";
 import { matchSegments, splitPath } from "./router";
@@ -64,6 +66,8 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
         error.message,
       );
     }
+    if (error instanceof SettingsError)
+      return errorJson(error.status, error.status === 404 ? "not_found" : "bad_request", error.message);
     if (error instanceof ProjectInUseError)
       return errorJson(409, "in_use", error.message, { sessions: error.sessions });
     const message = error instanceof Error ? error.message : String(error);
@@ -94,11 +98,29 @@ interface RestRoute {
   handler: RestHandler;
 }
 
-const num = (v: string | null): number | undefined => (v === null ? undefined : Number(v));
+type QueryNum = number | undefined | Response;
+
+function parseLimit(v: string | null): QueryNum {
+  if (v === null) return undefined;
+  if (!/^[1-9]\d*$/.test(v)) return errorJson(400, "bad_request", "limit must be a positive integer");
+  return Number(v);
+}
+
+function parseFiniteQuery(v: string | null, name: string): QueryNum {
+  if (v === null) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return errorJson(400, "bad_request", `${name} must be a finite number`);
+  return n;
+}
 
 export interface RestDeps {
   plugins(): PluginStatus[];
   reload(): Promise<ReloadResult>;
+  settings(): PluginSettings[];
+  updateSettings(plugin: string, patch: SettingsPatch): Promise<PluginSettings>;
+  /** Tells plugins a secret was written or removed (the name only). */
+  secretChanged(name: string): void;
+  valetHome: string;
   /** Raw db handle for blob metadata (the Store API exposes only put/path). */
   blobMeta(id: string): { sha256: string; mime: string | null; name: string | null } | undefined;
   blobPath(id: string): string;
@@ -169,12 +191,16 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
 
     r("GET", "/sessions", async (req, _ctx, store) => {
       const q = new URL(req.url).searchParams;
+      const limit = parseLimit(q.get("limit"));
+      if (limit instanceof Response) return limit;
+      const before = parseFiniteQuery(q.get("before"), "before");
+      if (before instanceof Response) return before;
       return json(
         store.sessions.list({
           ...(q.get("projectId") === null ? {} : { projectId: q.get("projectId") as string }),
           ...(q.get("status") === null ? {} : { status: q.get("status") as Session["status"] }),
-          ...(num(q.get("limit")) === undefined ? {} : { limit: num(q.get("limit")) }),
-          ...(num(q.get("before")) === undefined ? {} : { before: num(q.get("before")) }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(before === undefined ? {} : { before }),
         }),
       );
     }),
@@ -213,10 +239,14 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("GET", "/sessions/:id/messages", async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const q = new URL(req.url).searchParams;
+      const beforeSeq = parseFiniteQuery(q.get("beforeSeq"), "beforeSeq");
+      if (beforeSeq instanceof Response) return beforeSeq;
+      const limit = parseLimit(q.get("limit"));
+      if (limit instanceof Response) return limit;
       return json(
         store.messages.list(ctx.params.id as string, {
-          ...(num(q.get("beforeSeq")) === undefined ? {} : { beforeSeq: num(q.get("beforeSeq")) }),
-          ...(num(q.get("limit")) === undefined ? {} : { limit: num(q.get("limit")) }),
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+          ...(limit === undefined ? {} : { limit }),
         }),
       );
     }),
@@ -241,9 +271,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
           ...(clientId === undefined ? {} : { meta: { clientMessageId: clientId } }),
           role: b.role as "user" | "assistant" | "system" | "tool",
           parts: b.parts as Parameters<Store["messages"]["create"]>[0]["parts"],
-          ...(b.authorPrincipalId === undefined && ctx.caller.actor === undefined
-            ? {}
-            : { authorPrincipalId: (b.authorPrincipalId ?? ctx.caller.actor?.principalId) as string }),
+          ...(ctx.caller.actor === undefined ? {} : { authorPrincipalId: ctx.caller.actor.principalId }),
           ...(b.runId === undefined ? {} : { runId: String(b.runId) }),
           ...(b.status === undefined
             ? {}
@@ -297,6 +325,50 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("POST", "/config/reload", async () => {
       const result = await deps.reload();
       return json(result, result.ok ? 200 : 400);
+    }),
+
+    r("GET", "/settings", async () => json(deps.settings())),
+    r("GET", "/settings/:plugin", async (_req, ctx) => {
+      const found = deps.settings().find((p) => p.plugin === ctx.params.plugin);
+      return found ? json(found) : errorJson(404, "not_found", "unknown plugin");
+    }),
+    r("PATCH", "/settings/:plugin", async (req, ctx) => {
+      const b = await body(req);
+      const config = b.config;
+      if (config !== undefined && (typeof config !== "object" || config === null || Array.isArray(config)))
+        return errorJson(400, "bad_request", "config must be an object");
+      if (b.enabled !== undefined && typeof b.enabled !== "boolean")
+        return errorJson(400, "bad_request", "enabled must be a boolean");
+      const patch: SettingsPatch = {
+        ...(config === undefined ? {} : { config: config as Record<string, unknown> }),
+        ...(b.enabled === undefined ? {} : { enabled: b.enabled as boolean }),
+      };
+      return json(await deps.updateSettings(ctx.params.plugin as string, patch));
+    }),
+
+    r("GET", "/secrets", async () =>
+      json(listSecretFiles(deps.valetHome).map((name) => ({ name, source: "file" }))),
+    ),
+    r("GET", "/secrets/:name", async (_req, ctx) => {
+      const name = ctx.params.name as string;
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      return json({ name, source: secretSource(deps.valetHome, name) });
+    }),
+    r("PUT", "/secrets/:name", async (req, ctx) => {
+      const name = ctx.params.name as string;
+      const b = await body(req);
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      if (typeof b.value !== "string" || b.value.trim() === "")
+        return errorJson(400, "bad_request", "value must be a non-empty string");
+      writeSecret(deps.valetHome, name, b.value.trim());
+      deps.secretChanged(name);
+      return json({ name, source: "file" });
+    }),
+    r("DELETE", "/secrets/:name", async (_req, ctx) => {
+      const name = ctx.params.name as string;
+      if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
+      if (deleteSecret(deps.valetHome, name)) deps.secretChanged(name);
+      return json({ name, source: secretSource(deps.valetHome, name) });
     }),
 
     r("GET", "/blobs/:id", async (_req, ctx) => {

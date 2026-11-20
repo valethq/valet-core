@@ -1,4 +1,5 @@
 import type { Denial } from "./events";
+import type { ModelRef } from "./inference";
 import type { PartTypes } from "./parttypes";
 import type { ChannelBinding } from "./platform";
 import type { Role, ToolResult } from "./tools";
@@ -27,7 +28,7 @@ export interface Session {
   lastResponseAt: number | null;
 }
 export interface SessionSettings {
-  model?: { provider: string; model: string; fallbacks?: { provider: string; model: string }[] };
+  model?: ModelRef & { fallbacks?: ModelRef[] };
   persona?: string; // persona override; default comes from the project
   titlePlaceholder?: string; // title derived from the first message; an auto title may replace it only while session.title still equals it
   [pluginNamespace: string]: unknown; // e.g. "agent": { queueMode: "interrupt" }

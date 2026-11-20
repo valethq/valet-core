@@ -286,6 +286,30 @@ export interface ModelInfo {
   input: ("text" | "image")[];
   reasoning: boolean;
   cost?: { input: number; output: number; cacheRead?: number }; // per 1M tokens
+  /** Reasoning effort levels the model takes, lowest first, e.g. ["low", "medium", "high"]. Absent: none to pick. */
+  efforts?: string[];
+  /** The effort a selection without one runs at. */
+  defaultEffort?: string;
+  /** The model has a fast mode: a faster serving tier, usually billed higher. */
+  fast?: boolean;
+  /** Fast mode is on unless the selection turns it off. */
+  fastByDefault?: boolean;
+  /** Listed, but left out of pickers until the user shows it (previews, niche variants). */
+  hidden?: boolean;
+}
+
+/** How a model runs. Picked alongside the model and never encoded in its id. */
+export interface ModelOptions {
+  /** One of the model's `efforts`; unset runs its `defaultEffort`. */
+  effort?: string;
+  /** Fast mode on or off; unset follows `fastByDefault`. */
+  fast?: boolean;
+}
+
+/** A model choice as sessions, projects and config store it. */
+export interface ModelRef extends ModelOptions {
+  provider: string;
+  model: string;
 }
 
 export type InferenceProvider = ModelProvider | AgentProvider;
@@ -313,13 +337,12 @@ export interface ModelProvider extends ProviderBase {
   stream(req: InferenceRequest, signal: AbortSignal): AsyncIterable<InferenceChunk>;
 }
 
-export interface InferenceRequest {
+export interface InferenceRequest extends ModelOptions {
   model: string;
   system: string;
   messages: ModelMessage[];
   tools: ToolSpec[];
   maxOutputTokens?: number;
-  reasoning?: "off" | "low" | "medium" | "high";
   meta: { sessionId: string; runId: string };
 }
 
@@ -347,7 +370,7 @@ export interface AgentProvider extends ProviderBase {
   open(opts: AgentOpenOptions): Promise<AgentSession>;
 }
 
-export interface AgentOpenOptions {
+export interface AgentOpenOptions extends ModelOptions {
   sessionId: string;
   cwd: string;
   model: string;
@@ -371,7 +394,8 @@ export interface AgentSession {
   /** Persisted on the session so it can be reopened after a restart. */
   readonly resumeId: string;
   prompt(input: { content: ModelContent[]; preamble?: string }, signal: AbortSignal): AsyncIterable<AgentEvent>;
-  setModel?(model: string): Promise<void>;
+  /** Switches the open session to another model or other options; `options` replaces the previous ones whole. */
+  setModel?(model: string, options: ModelOptions): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -395,7 +419,9 @@ export type AgentEvent =
 
 Providers set `exitCode` on `tool-end` when the tool reports one; `valet-agent` stores it as the tool part's `result.meta.exitCode`. A `notice` event is out-of-band provider information (e.g. a context-compaction warning), rendered as a `notice` part rather than hidden inside reasoning text.
 
-**Fallbacks** are data, not provider logic. `session.settings.model` is `{ provider, model, fallbacks: [{ provider, model }...] }`. On `finish: error`, or a refusal, before any output has streamed, `valet-agent` retries with the next fallback. For Devin, `valet-devin` also passes `--refusal-fallback`.
+**Effort and fast mode are options, not models.** A provider lists each model once, with the efforts it takes and whether it has a fast mode, and receives the choice as `ModelOptions` on `stream()`, `open()` and `setModel()`. How a harness spells the choice (a variant id, a flag, a service tier) stays inside its provider. Ids from before this rule (`claude-opus-5-5-high`, `swe-2-medium-lightning`) are rewritten by `valet-agent` (11.1).
+
+**Fallbacks** are data, not provider logic. `session.settings.model` is a `ModelRef` plus `fallbacks: ModelRef[]`. On `finish: error`, or a refusal, before any output has streamed, `valet-agent` retries with the next fallback. For Devin, `valet-devin` also passes `--refusal-fallback`.
 
 ### 6.2 `tools@1`: tools
 
@@ -635,7 +661,7 @@ CREATE TABLE sessions (
   title TEXT, color TEXT,                   -- per-session indicator color
   parent_session_id TEXT REFERENCES sessions(id),  -- subagents
   status TEXT NOT NULL DEFAULT 'idle',      -- idle | running | archived
-  settings TEXT NOT NULL DEFAULT '{}',      -- JSON: model {provider, model, fallbacks}, persona override
+  settings TEXT NOT NULL DEFAULT '{}',      -- JSON: model {provider, model, effort, fast, fallbacks}, persona override
   provider_state TEXT NOT NULL DEFAULT '{}',-- JSON keyed by provider id, e.g. {"devin-cli":{"resumeId":"..."}}
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_message_at INTEGER
 );
@@ -700,7 +726,7 @@ export interface Session {
   createdAt: number; updatedAt: number; lastMessageAt: number | null;
 }
 export interface SessionSettings {
-  model?: { provider: string; model: string; fallbacks?: { provider: string; model: string }[] };
+  model?: ModelRef & { fallbacks?: ModelRef[] };
   persona?: string;                   // persona override; default comes from the project
   titlePlaceholder?: string;          // title valet-agent derived from the first message; an auto title may replace it only while session.title still equals it
   [pluginNamespace: string]: unknown; // e.g. "agent": { queueMode: "interrupt" }
@@ -949,7 +975,9 @@ Plugins publish under their own prefixes, e.g. `exec:<jobId>`. Core keeps a ring
 ### 11.1 `valet-agent`
 
 - **Requires:** `inference@1` and `context@1`, not a particular plugin. Optionally requires `tools@1`.
-- **Owns:** the run queue for each session, queue/interrupt/steer modes, the tool loop for `model` providers, `AgentSession` bridging for `agent` providers, fallbacks, `tool.call` emission, and slash commands (`/model`, `/compact`, `/new`, `/stop`).
+- **Owns:** the run queue for each session, queue/interrupt/steer modes, the tool loop for `model` providers, `AgentSession` bridging for `agent` providers, fallbacks, `tool.call` emission, slash commands (`/model`, `/compact`, `/new`, `/stop`), and the model catalog.
+- **Model catalog.** Every provider's `listModels()`, merged with the `models` list in valet-agent's config. A row `{ provider, id, ... }` overrides what the provider lists (name, context window, efforts, fast mode) or adds a model the provider does not list (`custom: true`, passed to the provider as is). `show` puts a model in pickers or takes it out; a row with `id: "*"` sets the default for that provider's unlisted models, which makes the list an allowlist. Without a row, a model shows unless its provider marks it `hidden`. Runs and the context window bar use the catalog's values. `GET /plugins/valet-agent/models` serves the catalog with each provider's own values beside the overrides.
+- **Legacy model ids.** A ref whose id is not in the catalog but ends in a speed word (`-fast`, `-priority`, `-lightning`) or an effort word (`-low` ... `-max`) over a listed model is read as that model with those options. At boot `valet-agent` rewrites such refs in sessions and projects once.
 - **Resume policy:**
   - On `run.interrupted`, it appends a `notice` part ("previous turn was interrupted by a restart") to the interrupted message.
   - If the run started less than 6 hours ago and was not cancelled by a user, it auto-resumes once with a new run whose trigger is that notice. An `agent` session reopens with its `resumeId`.
@@ -1015,7 +1043,7 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
 - **Default control-plane policy**, as before hooks on `control.request`: `owner` gets everything. `trusted` and `guest` principals get nothing on the control plane in v1, since friends use Discord (decision 5).
 - **Public-API only,** like every base plugin. Anything it can do, a replacement auth plugin can do.
 
-## 12. Boot, config and process
+## 12. Boot, config and settings
 
 - **Config:** `~/.valet/config.json`, with `VALET_HOME` overriding the location.
 
@@ -1031,9 +1059,58 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
   }
   ```
 
+- **Settings (12.1)** sit on top of the config file. **Secrets (12.2)** are files beside it.
 - **Service:** `valet start` runs in the foreground, and the deployment is a user systemd unit `valet.service` with `Restart=on-failure`. Jobs started by `valet-exec` run in their own units, so restarting `valet.service` leaves them running.
 - **Migration from OpenClaw:** `valet import-openclaw` copies `~/.openclaw/workspace` into `~/.valet/projects/helper` (decision 2). It creates the Helper project with the persona file list and the model list, and leaves OpenClaw untouched. Importing transcripts is optional and comes later. The audit showed where they live (`openclaw-agent.sqlite`, `transcript_events`).
 - **Logs:** JSON lines to stdout (journald) plus `~/.valet/logs/valet.log`, tagged with plugin id, session id and run id.
+
+### 12.1 Settings
+
+A plugin's settings are its config block, and its manifest's `configSchema` describes them. There is no second store. Core builds the effective block in three layers, each replacing the top-level keys of the one below:
+
+1. the schema's top-level `default` values,
+2. the plugin's block in `config.toml` / `config.json` (hand-edited),
+3. the plugin's entry in `<valetHome>/settings.json` (written by core when a UI saves; `{ "plugins": { "<id>": { "enabled"?: boolean, "config"?: {...} } } }`).
+
+`ctx.config` is always the effective block, validated against `configSchema`, so plugins read values without fallbacks of their own. A save, like a reload, calls the plugin's `onConfigChange` listeners. For a save, a throwing listener rejects it and nothing is written; a plugin with no listener has the save stored and reported as needing a restart. `enabled` in `settings.json` takes effect on the next start.
+
+Control plane (owner-only through `valet-auth`'s `control.request` policy):
+
+| Route | Does |
+|---|---|
+| `GET /api/core/settings` | `PluginSettings[]` for every discovered plugin |
+| `GET /api/core/settings/:plugin` | one `PluginSettings` |
+| `PATCH /api/core/settings/:plugin` | body `{ config?: { key: value \| null }, enabled?: boolean }`; `null` drops the saved value. 400 when the result fails the schema, 422 when the plugin refuses it |
+
+```ts
+interface PluginSettings {
+  plugin: string; name?: string; description?: string; version?: string;
+  provides: string[];
+  state: "active" | "failed" | "disabled" | "pending";
+  enabled: boolean;
+  schema?: Record<string, unknown>;    // the manifest's configSchema
+  values: Record<string, unknown>;     // effective block
+  sources: Record<string, "default" | "file" | "settings">;
+  restartRequired?: string;
+}
+```
+
+**UI hints.** A schema may carry hints beside standard JSON Schema (`title`, `description`, `default`, `enum`, `minimum`, `maximum`, `readOnly`, `format: "password"`). Core's validator ignores them. Keys a UI may use: `enumNames`; `x-widget` (`"textarea"`, `"secret"` for a string that names a secret the UI can set, `"model"` for a `ModelRef`, `"models"` for valet-agent's catalog, `"segmented"`); `x-advanced: true` (a collapsed Advanced section); `x-section` (a heading); `x-page` on a top-level property (another of the plugin's pages). On the schema root: `x-group` (`"system" | "inference" | "tools"`, listed in that order), `x-icon`, `x-order`, and `x-pages: { [id]: { title, description?, group?, icon?, order? } }`. Without `x-group` a UI files inference providers under inference, tool-only plugins under tools and the rest under system.
+
+**The `settings` scope** (`settings@1`, many, keyed by panel) is for what config can't hold: live view blocks (usage meters, connection state), actions, and forms whose values are not config (a password change). A panel shows on its plugin's page, or on one of its `x-pages` via `page`. Types are in the SDK's `settings.ts`: `SettingsPanel { title; description?; page?; schema?; get?; set?; view?; refreshMs?; actions? }` and the `SettingsBlock` union (`text`, `badge`, `stat`, `meter`, `table`, `button`, `group`).
+
+### 12.2 Secrets
+
+`ctx.secrets` stays read-only for plugins. The control plane can write the file layer:
+
+| Route | Does |
+|---|---|
+| `GET /api/core/secrets` | `[{ name, source: "file" }]` for the files in `<valetHome>/secrets/`; environment variables are never listed |
+| `GET /api/core/secrets/:name` | `{ name, source: "file" \| "env" \| null }`, never the value |
+| `PUT /api/core/secrets/:name` | body `{ value }`; writes the file with mode 0600 |
+| `DELETE /api/core/secrets/:name` | removes the file |
+
+Names match `[A-Za-z0-9][A-Za-z0-9._-]*`. A write or delete sends the `core.secrets.changed` signal with the name, so a plugin can drop a cached client.
 
 ## 13. Milestones
 

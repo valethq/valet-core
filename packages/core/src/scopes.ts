@@ -131,11 +131,16 @@ export function createScopeRegistry(opts: {
     forPlugin(pluginId, provides) {
       const allowed = new Set(provides);
       const tracked = new Set<Disposable>();
+      let closed = false;
 
       const view: ScopedScopeRegistry = {
-        define: (def) => registry.define(def),
+        define: (def) => {
+          if (closed) return;
+          registry.define(def);
+        },
 
         provide<K extends ScopeName>(scope: K, impl: ScopeImpl<K>, opts2?: { key?: string }): Disposable {
+          if (closed) return { dispose() {} };
           const def = defs.get(scope);
           if (!def) throw new Error(`unknown scope "${scope}" (define it first)`);
           const skey = scopeKey(scope, def.version);
@@ -198,6 +203,7 @@ export function createScopeRegistry(opts: {
         },
 
         watch<K extends ScopeName>(scope: K, fn: (providers: ScopeProvider<K>[]) => void): Disposable {
+          if (closed) return { dispose() {} };
           // spec-gap: fires immediately with the current providers, then on provide/dispose.
           const watcher = { plugin: pluginId, fn: fn as (p: ScopeProvider<ScopeName>[]) => void };
           const set = watchers.get(scope) ?? new Set();
@@ -214,6 +220,7 @@ export function createScopeRegistry(opts: {
         },
 
         disposeAll() {
+          closed = true;
           for (const disposable of tracked) disposable.dispose();
           tracked.clear();
         },

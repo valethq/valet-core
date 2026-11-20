@@ -9,6 +9,8 @@ export const fxRoot = (name: string) => join(FX, name);
 export interface BootFxOptions extends BootOptions {
   /** Extra keys merged into the config.json written to the temp valet home. */
   config?: Record<string, unknown>;
+  /** Runs on the temp valet home before the kernel boots (e.g. to write settings.json). */
+  beforeBoot?: (home: string) => void;
 }
 
 /** Boots the kernel with a temp VALET_HOME and pluginPaths pointing at one fixture root. */
@@ -17,8 +19,9 @@ export async function bootFx(
   opts: BootFxOptions = {},
 ): Promise<{ kernel: ValetKernel; home: string }> {
   const home = mkdtempSync(join(tmpdir(), "valet-p3-"));
-  const { config, ...rest } = opts;
+  const { config, beforeBoot, ...rest } = opts;
   writeFileSync(join(home, "config.json"), JSON.stringify({ pluginPaths: [fixtureRoot], ...(config ?? {}) }));
+  beforeBoot?.(home);
   const kernel = await boot({ valetHome: home, dbPath: ":memory:", out: () => {}, ...rest });
   return { kernel, home };
 }

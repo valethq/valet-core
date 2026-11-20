@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "fx-timeout",
+  "name": "fx-timeout",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts"
+}

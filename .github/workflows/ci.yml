@@ -7,8 +7,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: valet-core
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: valet-core
+      - uses: actions/checkout@v4
+        with:
+          repository: valethq/valet-agent
+          path: valet-agent
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"

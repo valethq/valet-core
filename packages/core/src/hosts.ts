@@ -57,8 +57,10 @@ export function createHttpRegistry(server: { host: string; port: number }): Http
     routes: () => routes,
     forPlugin(pluginId) {
       const tracked = new Set<Disposable>();
+      let closed = false;
       const host: ScopedHttpHost = {
         route(method, path, handler, opts) {
+          if (closed) return { dispose() {} };
           const record: RouteRecord = {
             plugin: pluginId,
             method,
@@ -81,6 +83,7 @@ export function createHttpRegistry(server: { host: string; port: number }): Http
         },
         url: (path) => `${base}/plugins/${pluginId}${normalizePath(path)}`,
         disposeAll: () => {
+          closed = true;
           for (const d of tracked) d.dispose();
           tracked.clear();
         },
@@ -107,8 +110,10 @@ export function createWsRegistry(): WsRegistry {
     },
     forPlugin(pluginId, namespace) {
       const tracked = new Set<Disposable>();
+      let closed = false;
       const host: ScopedWsHost = {
         handle(method, fn) {
+          if (closed) return { dispose() {} };
           if (!method.startsWith(`${namespace}.`)) {
             throw new Error(
               `plugin "${pluginId}" cannot handle ws method "${method}" outside its namespace "${namespace}"`,
@@ -136,6 +141,7 @@ export function createWsRegistry(): WsRegistry {
           broadcast?.(topic, name, data);
         },
         disposeAll: () => {
+          closed = true;
           for (const d of tracked) d.dispose();
           tracked.clear();
         },

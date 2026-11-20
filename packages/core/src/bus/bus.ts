@@ -16,7 +16,14 @@ import {
   type ValetSignals,
 } from "@valethq/sdk";
 import { deepFreeze } from "./freeze";
-import type { ActionResult, CoreBus, CoreBusOptions, HookErrorReport, ScopedPluginEventBus } from "./types";
+import {
+  CORE_EVENT_NAMESPACES,
+  type ActionResult,
+  type CoreBus,
+  type CoreBusOptions,
+  type HookErrorReport,
+  type ScopedPluginEventBus,
+} from "./types";
 
 type EvName = Extract<keyof ValetEvents, string>;
 type SigName = Extract<keyof ValetSignals, string>;
@@ -318,8 +325,8 @@ class CoreBusImpl implements CoreBus {
     }
   }
 
-  // 7.2 change 5: slow-hook warning plus a time limit; on timeout the hook keeps
-  // running detached but its result is dropped.
+  // spec-gap: after hooks share the before-hook time limit so a stuck observer cannot hang the session.
+  // On timeout the hook keeps running detached and its result is dropped.
   async #runHook(record: HookRecord, context: AnyEvent, depth: number): Promise<void> {
     const limit = this.#limits[context.name] ?? this.#limits["*"] ?? HOOK_LIMIT_MS;
     const started = performance.now();
@@ -384,12 +391,17 @@ class CoreBusImpl implements CoreBus {
   }
 }
 
+function inactiveSubscription(): Subscription {
+  return { active: false, disconnect() {} };
+}
+
 /** The PluginEventBus view one plugin sees (7.2 changes 1, 10, 11 + namespaces). */
 class PluginBusView implements ScopedPluginEventBus {
   readonly #bus: CoreBusImpl;
   readonly pluginId: string;
   readonly namespace: string;
   readonly #registered = new Set<Subscription | Disposable>();
+  #closed = false;
 
   constructor(bus: CoreBusImpl, pluginId: string, namespace: string) {
     this.#bus = bus;
@@ -402,6 +414,7 @@ class PluginBusView implements ScopedPluginEventBus {
     fn: (e: BeforeEvent<N, ValetEvents[N]>) => void | Promise<void>,
     opts: HookOptions = {},
   ): Subscription {
+    if (this.#closed) return inactiveSubscription();
     return this.#track(this.#bus.addHook(this.pluginId, "before", name, fn as HookFn, opts));
   }
 
@@ -410,6 +423,7 @@ class PluginBusView implements ScopedPluginEventBus {
     fn: (e: AfterEvent<N, ValetEvents[N]>) => void | Promise<void>,
     opts: HookOptions = {},
   ): Subscription {
+    if (this.#closed) return inactiveSubscription();
     return this.#track(this.#bus.addHook(this.pluginId, "after", name, fn as HookFn, opts));
   }
 
@@ -419,6 +433,7 @@ class PluginBusView implements ScopedPluginEventBus {
   }
 
   onSignal<N extends SigName>(name: N, fn: (payload: ValetSignals[N], caller: Caller) => void): Subscription {
+    if (this.#closed) return inactiveSubscription();
     return this.#track(this.#bus.addSignal(this.pluginId, name, fn as SignalFn));
   }
 
@@ -428,10 +443,15 @@ class PluginBusView implements ScopedPluginEventBus {
   }
 
   restrict(fn: (subscriber: string, name: string) => boolean): Disposable {
+    if (this.#closed) return { dispose() {} };
+    if (CORE_EVENT_NAMESPACES.has(this.namespace)) {
+      throw new Error(`plugin "${this.pluginId}" cannot restrict core namespace "${this.namespace}"`);
+    }
     return this.#track(this.#bus.addRestrict(this.pluginId, this.namespace, fn));
   }
 
   disposeAll(): void {
+    this.#closed = true;
     for (const item of this.#registered) {
       if ("disconnect" in item) {
         item.disconnect();
@@ -447,9 +467,13 @@ class PluginBusView implements ScopedPluginEventBus {
     return item;
   }
 
-  /** Plugins may emit `<namespace>.*` and the shared `tool.call` action (7.2). */
+  /** Plugins may emit `<namespace>.*` and the shared `tool.call` action (7.2). Core prefixes are reserved. */
   #assertEmitAllowed(name: string): void {
-    if (name !== "tool.call" && !name.startsWith(`${this.namespace}.`)) {
+    const prefix = name.split(".")[0] ?? "";
+    if (
+      name !== "tool.call" &&
+      (CORE_EVENT_NAMESPACES.has(prefix) || !name.startsWith(`${this.namespace}.`))
+    ) {
       throw new Error(
         `plugin "${this.pluginId}" cannot emit "${name}" outside its namespace "${this.namespace}"`,
       );

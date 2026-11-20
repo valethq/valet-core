@@ -1,12 +1,10 @@
 import { CORE_API_VERSION } from "@valethq/sdk";
+import { CORE_EVENT_NAMESPACES } from "./bus/types";
 
 // spec-gap: the doc shows ids like "valet-discord" but never fixes a grammar.
 const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const SCOPE_KEY_RE = /^[a-z0-9][a-z0-9-]*@\d+$/;
-// spec-gap: Bun.semver treats a garbage range as "*", so require range-ish
-// characters plus at least one digit or wildcard.
-const RANGE_RE = /^[0-9A-Za-z.*+^~<>=|,&\s-]+$/;
-const hasVersionChar = (s: string) => /[0-9*xX]/.test(s);
+// spec-gap: Bun.semver treats a garbage range as "*", so require a real range.
 
 export function scopeKey(name: string, version: number): string {
   return `${name}@${version}`;
@@ -25,6 +23,57 @@ function isSemver(value: string): boolean {
   }
 }
 
+function isPrereleaseId(id: string): boolean {
+  if (!/^[0-9A-Za-z-]+$/.test(id)) return false;
+  return !/^\d+$/.test(id) || /^(?:0|[1-9]\d*)$/.test(id);
+}
+
+/** A partial version: `1`, `1.2`, `1.2.3`, `1.x`, `*`, with an optional `v`, prerelease and build. */
+function isPartial(value: string): boolean {
+  const match = /^(v)?([^+-]+?)(?:-([^+]+))?(?:\+(.+))?$/.exec(value);
+  if (match === null) return false;
+  const core = match[2];
+  if (core === undefined || core === "") return false;
+  const parts = core.split(".");
+  if (parts.length > 3) return false;
+  let wildcard = false;
+  for (const part of parts) {
+    if (!/^(?:0|[1-9]\d*|[xX*])$/.test(part)) return false;
+    if (wildcard && !/^[xX*]$/.test(part)) return false;
+    if (/^[xX*]$/.test(part)) wildcard = true;
+  }
+  const pre = match[3];
+  const build = match[4];
+  if (pre !== undefined && !pre.split(".").every(isPrereleaseId)) return false;
+  if (build !== undefined && !build.split(".").every((part) => /^[0-9A-Za-z-]+$/.test(part))) return false;
+  return true;
+}
+
+function isComparator(token: string): boolean {
+  const version = /^(>=|<=|>|<|=|~|\^)?(.+)$/.exec(token)?.[2];
+  return version !== undefined && version !== "" && isPartial(version);
+}
+
+/** `*`, a comparator, an AND (`>=1.0.0 <2.0.0`), a hyphen (`1.0.0 - 2.0.0`) or OR (`||`) of those. */
+function isSemverRange(range: string): boolean {
+  if (range.length === 0 || range !== range.trim()) return false;
+  const clauses = range.split(/\s*\|\|\s*/);
+  if (clauses.length === 0) return false;
+  for (const clause of clauses) {
+    if (clause.length === 0) return false;
+    const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(clause);
+    if (hyphen !== null) {
+      const left = hyphen[1];
+      const right = hyphen[2];
+      if (left === undefined || right === undefined || !isPartial(left) || !isPartial(right)) return false;
+      continue;
+    }
+    const tokens = clause.split(/\s+/);
+    if (tokens.length === 0 || tokens.some((token) => !isComparator(token))) return false;
+  }
+  return true;
+}
+
 function checkRangeMap(value: unknown, field: string, errors: string[]): void {
   if (value === undefined) return;
   if (!isRecord(value)) {
@@ -33,7 +82,7 @@ function checkRangeMap(value: unknown, field: string, errors: string[]): void {
   }
   for (const [dep, range] of Object.entries(value)) {
     if (!ID_RE.test(dep)) errors.push(`${field} key "${dep}" is not a plugin id`);
-    if (typeof range !== "string" || range === "" || !RANGE_RE.test(range) || !hasVersionChar(range)) {
+    if (typeof range !== "string" || !isSemverRange(range)) {
       errors.push(`${field}["${dep}"] must be a semver range, got ${JSON.stringify(range)}`);
     }
   }
@@ -60,7 +109,7 @@ export function validateManifest(manifest: unknown): string[] {
   if (typeof m.version !== "string" || !isSemver(m.version)) {
     errors.push(`version must be semver, got ${JSON.stringify(m.version)}`);
   }
-  if (typeof m.valet !== "string" || m.valet === "" || !RANGE_RE.test(m.valet) || !hasVersionChar(m.valet)) {
+  if (typeof m.valet !== "string" || !isSemverRange(m.valet)) {
     errors.push(`valet must be a semver range, got ${JSON.stringify(m.valet)}`);
   } else if (!Bun.semver.satisfies(CORE_API_VERSION, m.valet)) {
     errors.push(`valet range "${m.valet}" does not cover core API ${CORE_API_VERSION}`);
@@ -83,9 +132,15 @@ export function validateManifest(manifest: unknown): string[] {
   checkScopeList(m.requires, "requires", errors);
   checkScopeList(m.optionalRequires, "optionalRequires", errors);
 
-  const ns = (m.events as Record<string, unknown> | undefined)?.namespace;
+  const ns = isRecord(m.events) ? m.events.namespace : undefined;
   if (ns !== undefined && (typeof ns !== "string" || !ID_RE.test(ns))) {
     errors.push(`events.namespace must match ${ID_RE}, got ${JSON.stringify(ns)}`);
+  } else {
+    const effective =
+      typeof ns === "string" ? ns : typeof m.id === "string" ? m.id.replace(/^valet-/, "") : "";
+    if (CORE_EVENT_NAMESPACES.has(effective)) {
+      errors.push(`events.namespace "${effective}" is reserved by core`);
+    }
   }
   if (m.configSchema !== undefined && !isRecord(m.configSchema)) {
     errors.push("configSchema must be an object");
