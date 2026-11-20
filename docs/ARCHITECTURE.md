@@ -71,7 +71,7 @@ graph TD
 
 | Core owns | Plugins own |
 |---|---|
-| Loading, ordering, activating and deactivating plugins | The agent loop, run queueing, interrupt and steer policy (`valet-agent`) |
+| Loading, ordering, activating and deactivating plugins | The agent loop, run queueing and interrupt policy (`valet-agent`) |
 | The event bus and the core event catalog | Prompt building, history windowing, compaction, persona and memory files (`valet-contextmanager`) |
 | Persistence of projects, sessions, messages, parts, runs, principals, blobs and plugin KV | Model calls (`valet-devin`, later `valet-openai`) |
 | Detecting interrupted runs at boot | Deciding whether to resume them (`valet-agent`) |
@@ -126,7 +126,9 @@ export interface PluginManifest {
   optionalRequires?: string[];
   /** Event namespace this plugin may emit under. Defaults to the id without the "valet-" prefix. */
   events?: { namespace?: string };
-  /** JSON Schema for this plugin's config block; core validates it before activate(). */
+  /** Settings v3 document (12.1): config and settings UI in one. Core compiles it into the config schema. */
+  settings?: SettingsDoc;
+  /** JSON Schema for this plugin's config block when it has no `settings` document; ignored when `settings` is present. */
   configSchema?: Record<string, unknown>;
   /** Reserved for post-v1 permissions. Ignored in v1 (plugins are fully trusted). */
   permissions?: string[];
@@ -161,7 +163,7 @@ Example:
 ### 5.2 Discovery, resolution and load order
 
 1. **Discover.** Core reads every `*/manifest.json` under each `pluginPaths` entry in config (default `~/.valet/plugins` and the repo's `plugins/`). A plugin listed in `plugins` config as disabled is dropped. Two manifests with the same id is a boot error.
-2. **Validate.** Core checks the manifest against the schema and `valet` against the core API version. It validates the plugin's config block against `configSchema`. A failure marks only that plugin `failed`.
+2. **Validate.** Core checks the manifest against the schema and `valet` against the core API version. It compiles the plugin's `settings` document (12.1), or takes its `configSchema`. It migrates each stored layer, merges them, resolves `secret:`, `file:` and `env:` refs (12.2), parses unit strings, and only then validates the block and checks `required`. A malformed document, a validation failure, or a failed `secret:`/`file:`/`env:` ref on a required setting marks only that plugin `failed`. `cmd:` refs are not resolved at load.
 3. **Build the graph.** Edges come from `dependencies`, from `optionalDependencies` when present, and from `requires`/`optionalRequires`: for each scope required, an edge runs from every plugin that `provides` it. A missing hard dependency or required scope marks the plugin `failed`, and that cascades to its dependents.
 4. **Order.** Core runs a topological sort (Kahn's algorithm), breaking ties by id so boot order is deterministic. Plugins in a cycle are all marked `failed` with the cycle printed. Core does not guess.
 5. **Activate** sequentially in that order: `await plugin.activate(ctx)`, with a 15s timeout. A throw or timeout marks the plugin `failed`, disposes anything it registered, and fails its hard dependents. Optional dependents still activate.
@@ -181,7 +183,21 @@ export declare function definePlugin<Config = unknown>(plugin: ValetPlugin<Confi
 
 export interface PluginContext<Config = unknown> {
   readonly plugin: { readonly id: string; readonly version: string; readonly dir: string; readonly manifest: PluginManifest };
+  /** The applied user block (12.1 layers 1-3), refs resolved; `cmd:` values come from the cache. */
   readonly config: Config;
+  /** A project's view: its project layer over the applied user block. `ctx.config` for an unknown project or one without overrides. */
+  configFor(projectId: string): Config;
+  /**
+   * Pre-save veto: runs before a save (user or project) is written, with the validated next and current blocks.
+   * Throw to reject the save (422 for a user save, 400 for a project save); nothing is written.
+   */
+  onConfigCheck(fn: (next: Config, prev: Config) => void | Promise<void>): void;
+  /**
+   * Runs after a user save, reload or ref re-resolve changed this plugin's desired block. `ctx.config` switches to
+   * `next` only once every listener has returned. A throw keeps the previous applied block and reports the error as
+   * restart-required; it never rejects the save. A plugin without a listener is reported as restart-required.
+   */
+  onConfigChange(fn: (next: Config, prev: Config) => void | Promise<void>): void;
   readonly log: Logger;
   readonly events: PluginEventBus;
   readonly scopes: ScopeRegistry;
@@ -708,6 +724,8 @@ CREATE INDEX messages_session ON messages(session_id, seq);
 CREATE INDEX runs_session ON runs(session_id, started_at);
 ```
 
+`projects.settings` keeps the keys listed above. Per-project plugin settings (12.1's project layer) are not in the database: they live in `<valetHome>/project-data/<project-id>/settings.json`, which core owns and watches. The generic project routes and `Store.projects` never read or write that file; core deletes it with the project.
+
 Blob bytes live at `~/.valet/blobs/<sha256[0:2]>/<sha256>`, and rows point at them. Full-text search over part text (for "read our last session and continue") uses an FTS5 table if Bun's bundled SQLite has FTS5 enabled. That gets checked in M0. The fallback is `LIKE` over `parts`.
 
 ### 8.3 Roles
@@ -836,7 +854,7 @@ A tool call and its result are one part that updates in place. That's what the "
 ### 9.3 Lifecycle of a turn (web, `model` provider)
 
 1. The UI calls `POST /api/core/sessions/:id/messages`, and core runs the `message.create` action. A before hook may treat `/model opus` as a command and cancel the message. Otherwise the message is persisted.
-2. `valet-agent`'s after hook queues a run. One run is active per session. A new user message during a run follows `settings.agent.queueMode`: `queue` (default for web), `interrupt` (default for Discord, as OpenClaw does it) or `steer` (inject at the next tool boundary).
+2. `valet-agent`'s after hook queues a run. One run is active per session. A new user message during a run follows `valet-agent`'s global `queueMode` setting: `queue` (the default) or `interrupt`. There is no per-session override and no `steer`.
 3. The run starts. `valet-agent` creates the assistant message (`streaming`) and calls `context.build()`, then `inference.stream()`. Deltas go to `PartWriter.append`, which sends `message.delta` signals to WS.
 4. For each tool call: `tool.call` (before hooks may deny), then `tool.invoke` (with `progress()` streaming), then the part update. The loop continues until `finish: stop`.
 5. `message.complete` and `run.end`. If `context.shouldCompact()` returns true, compaction runs before the next run.
@@ -1005,7 +1023,7 @@ export interface DirListing {
 ### 11.1 `valet-agent`
 
 - **Requires:** `inference@1` and `context@1`, not a particular plugin. Optionally requires `tools@1`.
-- **Owns:** the run queue for each session, queue/interrupt/steer modes, the tool loop for `model` providers, `AgentSession` bridging for `agent` providers, fallbacks, `tool.call` emission, slash commands (`/model`, `/compact`, `/new`, `/stop`), and the model catalog.
+- **Owns:** the run queue for each session, queue/interrupt modes, the tool loop for `model` providers, `AgentSession` bridging for `agent` providers, fallbacks, `tool.call` emission, slash commands (`/model`, `/compact`, `/new`, `/stop`), and the model catalog.
 - **Model catalog.** Every provider's `listModels()`, merged with the `models` list in valet-agent's config. A row `{ provider, id, ... }` overrides what the provider lists (name, context window, efforts, fast mode) or adds a model the provider does not list (`custom: true`, passed to the provider as is). `show` puts a model in pickers or takes it out; a row with `id: "*"` sets the default for that provider's unlisted models, which makes the list an allowlist. Without a row, a model shows unless its provider marks it `hidden`. Runs and the context window bar use the catalog's values. `GET /plugins/valet-agent/models` serves the catalog with each provider's own values beside the overrides.
 - **Legacy model ids.** A ref whose id is not in the catalog but ends in a speed word (`-fast`, `-priority`, `-lightning`) or an effort word (`-low` ... `-max`) over a listed model is read as that model with those options. At boot `valet-agent` rewrites such refs in sessions and projects once.
 - **Resume policy:**
@@ -1089,28 +1107,398 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
   }
   ```
 
-- **Settings (12.1)** sit on top of the config file. **Secrets (12.2)** are files beside it.
+- **Settings (12.1)** sit on top of the config file: a user layer in `<valetHome>/settings.json` and per-project layers in `<valetHome>/project-data/<project-id>/settings.json`. **Secrets (12.2)** are files beside it, and settings may reference them as `${secret:name}`.
 - **Service:** `valet start` runs in the foreground, and the deployment is a user systemd unit `valet.service` with `Restart=on-failure`. Jobs started by `valet-exec` run in their own units, so restarting `valet.service` leaves them running.
 - **Migration from OpenClaw:** `valet import-openclaw` copies `~/.openclaw/workspace` into `~/.valet/projects/helper` (decision 2). It creates the Helper project with the persona file list and the model list, and leaves OpenClaw untouched. Importing transcripts is optional and comes later. The audit showed where they live (`openclaw-agent.sqlite`, `transcript_events`).
 - **Logs:** JSON lines to stdout (journald) plus `~/.valet/logs/valet.log`, tagged with plugin id, session id and run id.
 
 ### 12.1 Settings
 
-A plugin's settings are its config block, and its manifest's `configSchema` describes them. There is no second store. Core builds the effective block in three layers, each replacing the top-level keys of the one below:
+A plugin's settings are its config block. Its manifest's `settings` document (settings v3) describes both the config and its settings UI: a file reader (JSON/TOML, CLI) uses ids, storage kinds and defaults and passes stored strings (refs, unit strings) through unparsed; a UI uses everything. There is no second store. Inputs compose like a component library: a UI that doesn't know a type renders its base type. Core rejects a document that names a type core doesn't ship, so "renders its base" applies to UIs older than the document, never to core.
 
-1. the schema's top-level `default` values,
-2. the plugin's block in `config.toml` / `config.json` (hand-edited),
-3. the plugin's entry in `<valetHome>/settings.json` (written by core when a UI saves; `{ "plugins": { "<id>": { "enabled"?: boolean, "config"?: {...} } } }`).
+#### Hierarchy
 
-`ctx.config` is always the effective block, validated against `configSchema`, so plugins read values without fallbacks of their own. A save, like a reload, calls the plugin's `onConfigChange` listeners. For a save, a throwing listener rejects it and nothing is written; a plugin with no listener has the save stored and reported as needing a restart. `enabled` in `settings.json` takes effect on the next start.
+```
+Section          system | inference | tools          (navigation bucket, fixed list, in that order)
+  Plugin         "Claude Code"                        (one page per plugin; a plugin may appear in more than one section)
+    Subsection   { id: "tools", label: "Tooling" }    (tab or heading on the plugin page)
+      Setting    { id: "permissionMode", ... }        (one config key, one value-bearing input)
+      Display    { type: "note", ... }                (stores nothing)
+```
 
-Control plane (owner-only through `valet-auth`'s `control.request` policy):
+- The section and subsection are presentation only. **They never appear in the config path.** Moving a setting to
+  another subsection, or a plugin to another section, does not change any stored config.
+- A setting's `id` is a top-level key of its plugin's config block, which lives where section 12 puts it:
+  `{ "plugins": { "<pluginId>": { "enabled"?: boolean, "config"?: { "<settingId>": value } } } }`.
+- Every subsection is listed explicitly; there is no implicit one. A plugin page with one subsection, counting
+  runtime ones, shows no tabs.
+- A plugin may appear in several sections at once (valet-agent's main page under `system`, its models page under
+  `inference`): `sections` maps each named bucket to that plugin's own `order`, `icon` and subsection list.
 
-| Route | Does |
+#### Value rule
+
+A setting stores the value of its one `input`. A setting that holds several values uses a `group` input, which
+stores an object keyed by its inputs' ids. Display types store nothing and may sit beside settings in a subsection
+or inside a `group`.
+
+```toml
+[plugins.valet-claudecode.config]
+permissionMode = "acceptEdits"
+utilityModel   = { model = "claude-haiku-5-5", effort = "low" }
+```
+
+Changing a setting's storage kind (a string becoming a `group`) is a breaking change and needs a `migrate` entry.
+
+#### Document shape
+
+Lives in `manifest.json` under `settings` (5.1). Core compiles it into the plugin's `configSchema` (see Compile).
+
+```ts
+interface SettingsDoc {
+  sections: Partial<Record<"system" | "inference" | "tools", SectionDoc>>;
+  types?: Record<string, InputDef>;    // plugin-local recipes; names start with "local:" (see Fallback)
+}
+
+interface SectionDoc {
+  icon?: string;
+  order?: number;                      // within the section; lower first
+  subsections: Subsection[];           // at least one; shown in `order`, then listed order
+}
+
+interface Subsection {
+  id: string;
+  label: string;
+  summary?: string;
+  order?: number;
+  items: (Setting | Display)[];
+}
+
+interface Setting {
+  id: string;                          // config key
+  label: string;
+  summary?: string;                    // one line, under the label
+  details?: string;                    // long help (markdown); falls back to summary
+  input: Input;                        // value-bearing; label defaults to the setting's
+  when?: Cond;                         // hide unless true
+  scopes?: Scope[];                    // default ["user"]
+  apply?: "live" | "restart";          // UI hint before saving; default "live"
+  advanced?: boolean;                  // collapsed "Advanced" block on its subsection
+  deprecated?: string;                 // shown on the setting; the setting is hidden unless a layer stores a value
+  keywords?: string[];                 // for settings search
+  migrate?: Migration[];               // see Migration
+}
+
+type Scope = "user" | "project";
+
+interface InputBase {
+  type: string;
+  id?: string;                         // required inside a group (its key); unused on a setting's own input
+  label?: string;
+  summary?: string;
+  default?: unknown;                   // a group without one takes its inputs' defaults
+  required?: boolean;
+  readonly?: boolean;
+  when?: Cond;
+  refs?: Resolver[];                   // which ${...} resolvers this input accepts (see References)
+  ttl?: number;                        // cmd: cache lifetime, ms; default 60000 (see References)
+}
+
+type Resolver = "secret" | "file" | "env" | "cmd";
+```
+
+Setting, subsection and input ids match `/^[a-zA-Z][a-zA-Z0-9_-]*$/` (no `.`, so they can't collide with Path dot
+syntax). Reserved words rejected at doc load: `enabled`, `constructor`, `__proto__`, `prototype`, `hasOwnProperty`.
+
+#### Inputs
+
+Each type has a **storage kind** (`boolean | number | string | array | object`) and either is a **primitive** or
+names a **base** type.
+
+##### Fallback
+
+Every v3 UI implements the primitives and the v3 derived types. A UI that doesn't know a type renders its base,
+recursively, down to a type it knows. Core only ever needs the storage kind, constraints and unit parser. A type
+added after v3 must have a base whose rendering edits its stored value correctly, and may not accept stored forms
+(like unit strings) its base doesn't.
+
+Catalog types are recipes too: core ships each derived type as `{ base, ...fields }`, the same shape as a local
+recipe. `PluginSettings.types` carries the chain for every non-primitive type the doc uses, so a UI older than core
+can fall back without upgrading. Core fails a plugin whose doc uses a type core doesn't know.
+
+Plugins define recipes in `types`. Names start with `local:` so they never collide with catalog types added later.
+A recipe may only set fields its base understands. No plugin-shipped renderers.
+
+```jsonc
+"types": {
+  "local:hostport": { "base": "strict_string", "pattern": "^[^:]+:\\d{1,5}$", "patternHint": "host:port" }
+}
+```
+
+##### Primitives
+
+| Type | Stores | Fields |
+|---|---|---|
+| `bool` | boolean | `style: switch \| checkbox` |
+| `number` | number | `min`, `max`, `exclusiveMin`, `exclusiveMax`, `step`, `unit`, `integer`, `precision`, `style: field \| slider`, `scale: linear \| log \| steps`, `marks: {value,label}[]` |
+| `range` | [number, number] | as `number` |
+| `string` | string | `placeholder`, `minLength`, `maxLength`, `masked` (rendered but never echoed into the response body for runtime fields) |
+| `tags` | string[] | free entry |
+| `group` | object | `inputs: (Input \| Display)[]`, `layout: stack \| row` |
+| `list` | array | `item: Input`, `style: rows \| table`, `min`, `max`, `addLabel` |
+| `map` | object | `key: Input` (string-stored), `value: Input` |
+| `variant` | object | `tag: string`, `cases: { value, label, inputs }[]` |
+
+##### Derived
+
+| Type | Base | Stores | Fields |
+|---|---|---|---|
+| `int` | `number` | number | `integer: true` |
+| `percent` | `number` | number | stored 0–1, shown 0–100%; `min`/`max`/`exclusiveMin`/`exclusiveMax` are in stored units |
+| `duration` | `int` | number (ms) | also accepts `"500ms"`, `"5m"`, `"1h30m"` |
+| `bytes` | `int` | number | also accepts `"64 KiB"` (1024), `"64 KB"` (1000) |
+| `tokens` | `int` | number | also accepts `"128k"`, `"1m"` |
+| `strict_string` | `string` | string | `pattern`, `patternHint` |
+| `text` | `string` | string | `lines`, `mono` |
+| `code` | `text` | string | `language: json \| toml \| markdown \| shell \| regex` |
+| `secret` | `string` | string | stores only `${secret:<name>}`; see References |
+| `path` | `string` | string | `kind: file \| dir`, `mustExist` |
+| `url` | `strict_string` | string | `schemes` |
+| `color` | `strict_string` | string | pattern `#rrggbb` |
+| `keybind` | `string` | string | captured shortcut |
+| `select` | `string` | string | `options`, `style: dropdown \| segmented \| cards` |
+| `multiselect` | `tags` | string[] | `options`, `style: checklist \| chips`, `min`, `max` |
+| `ref` | `select` | string | `options.from` required; an entity id (model, tool, MCP server, plugin) |
+
+Unit strings (`duration`, `bytes`, `tokens`) may be stored in any layer. Core parses them on load; a save stores
+what was sent.
+
+**Unset vs empty.** Unset means "take the default / inherit from the layer below". An explicitly stored `[]` (or
+`""` where the type allows it) is a real value: claudecode's `tools` treats unset as "defaults" and `[]` as
+"disable all", and cursor's `autoReview`/`sandbox` treat unset as "the SDK default". The UI always shows the
+effective value with its source and offers a reset-to-inherited control that clears the layer's stored value.
+Clearing a `multiselect` sends `[]`, not `null`.
+
+##### Display
+
+Store nothing. `id` is optional; `when` applies as for inputs.
+
+| Type | Fields |
 |---|---|
-| `GET /api/core/settings` | `PluginSettings[]` for every discovered plugin |
-| `GET /api/core/settings/:plugin` | one `PluginSettings` |
-| `PATCH /api/core/settings/:plugin` | body `{ config?: { key: value \| null }, enabled?: boolean }`; `null` drops the saved value. 400 when the result fails the schema, 422 when the plugin refuses it |
+| `heading` | `text` |
+| `note` | `text`, `tone` |
+| `divider` | — |
+| `link` | `text`, `href` |
+| `badge` | `text`, `tone` |
+| `stat` | `label`, `value`, `caption` |
+| `meter` | `label`, `value` (0–100), `display`, `caption`, `status`, `marker` (0–100), `tone` |
+| `table` | `columns`, `rows` |
+
+`tone` is `normal | good | warning | critical`. `badge`, `stat`, `meter` and `table` may instead name `from` (a view
+source, with `args` as for options): the view returns the type's fields and the UI merges them over the static ones.
+| `action` | `text`, `action`, `args`, `confirm`, `tone` |
+
+`list` with `style: table` covers plain tables. valet-ui's models table stays hand-written: it shows each provider's
+own values beside the overrides and rows for models without an override, which a list of stored rows can't.
+
+##### Options
+
+```ts
+interface Option { value: string; label?: string; summary?: string; icon?: string; group?: string }
+type Options = Option[] | { from: SourceRef; args?: Record<string, unknown | { $: Path }> };
+type SourceRef = string;   // "name" (own plugin) or "<pluginId>/name", e.g. "valet-agent/models"
+```
+
+Core validates static options as an enum. Options `from` a source are not validated against the source.
+
+#### Dynamic behaviour
+
+All declarative. No expressions beyond `Cond`.
+
+**Paths.** A `Path` points into values in their stored shape: `"settingId"` or `"settingId.key.key"` through
+groups, within the plugin. Inside a `list` item or `map` value, `"@"` is the current item and `"@.key"` a key in it.
+In a runtime subsection, paths point into its own `get` values. Paths see values as `PluginSettings.values` holds
+them: unit strings parsed, refs as raw text.
+
+```ts
+type Path = string;
+type Cond =
+  | { eq: [Path, unknown] } | { ne: [Path, unknown] } | { in: [Path, unknown[]] }
+  | { set: Path } | { not: Cond } | { all: Cond[] } | { any: Cond[] };
+```
+
+**Sources.** Options and display values `from` a source call the owning plugin's `settings@2` contribution (see
+Runtime) through the UI plugin. Arg values `{ "$": Path }` are filled from current form values, so efforts can
+depend on the chosen model. If the owning plugin isn't active, the UI renders the input as its storage primitive
+with a notice, so the stored value stays visible and editable.
+
+**Conditions.** A hidden setting keeps its stored value. Core and UIs evaluate `when` and `required` on the same
+thing: the raw stored text — `eq`/`ne`/`in` compare the stored value literally (a ref string never equals a resolved
+value), `set` is true when the key is present and not `null`. `required` is enforced only where `when` holds, at
+every depth. A condition on a ref-bearing input may only use `set`; a doc that uses `eq`/`ne`/`in` on a
+ref-bearing input fails at load.
+
+**Apply.** `apply` tells the UI before saving whether to expect a live change or a restart. Core still decides:
+`PluginSettings.liveConfig` is false when the plugin has no `onConfigChange` listener, and the UI then treats every
+setting as `restart`. What actually happened comes back in `restartRequired`.
+
+**Editing a layer.** A form edits one layer and starts from that layer's stored values (`PluginSettings.layers`), not
+the merged ones, so an unset key stays unset and a unit string stays a string. Inherited values show as
+placeholders with their source; the reset-to-inherited control clears the stored value. When editing user scope in a
+project's context, settings the project overrides are marked (`sources[id] === "project"`) but the field holds the
+user value. A save sends only the keys the user touched — for a `group`, the whole group object, since layers
+merge at the top level.
+
+**Templating.** Not in v3. The `${...}` syntax (below) leaves room for `${= expr}` later.
+
+#### Scopes (layers)
+
+Layers merge in this order, each replacing the top-level keys of the one below:
+
+1. schema defaults
+2. config file (`<valetHome>/config.toml` or `config.json`, hand-edited)
+3. `user`: `<valetHome>/settings.json`, written by core on save
+4. `project`: `<valetHome>/project-data/<project-id>/settings.json`, written by core on save (and watched for
+   hand edits), only for settings whose `scopes` include `"project"`
+
+Config exists in three forms, and this section keeps them apart:
+
+- **Stored**: each layer as written (unit strings and refs as text). The control plane edits these.
+- **Desired**: stored layers migrated, merged, parsed and validated, with `secret:`, `file:` and `env:` resolved.
+  `cmd:` is still text; it is resolved on read. What a restart would give the plugin.
+- **Applied**: the desired block the plugin last accepted. It differs from desired while a change waits for a
+  restart, or after a listener throws. `ctx.config` is the applied user block (layers 1–3).
+
+A schema or required failure is 400 and writes nothing, so stored, desired and applied stay put. A save that passes
+is stored and desired is recomputed. Before the write, core runs the plugin's `onConfigCheck(next, prev)` hook: a
+throw there rejects the save (422, nothing written) — this is the plugin's veto for values that pass the schema but
+are semantically wrong. After the write, every plugin's `onConfigChange` listeners run on the new desired block;
+`ctx.config` only switches to it once **all** listeners have returned — until then plugins keep reading the last
+applied block. If a listener throws, applied stays the last block the plugin accepted, `ctx.config` does not
+change, and `restartRequired` carries the error. The save response is that `PluginSettings`, not a refusal. A
+plugin with no listener is stored the same way and reported as needing a restart. A reload or a `file:` / secrets
+re-resolve follows the same rule: desired becomes the new block, and no listener, or a throw, leaves applied where
+it was and sets `restartRequired`. This replaces 12.1's rule that a throwing listener rejects the save and nothing
+is written.
+
+A plugin reads a project's view with `ctx.configFor(projectId)`: the project layer over the **applied** user block,
+so a project without overrides always sees exactly `ctx.config`. Core rebuilds these snapshots whenever the applied
+block or a project layer changes and publishes them whole; `secret:`, `file:` and `env:` are resolved before
+publish. `configFor` looks one up synchronously; `cmd:` values come from the cache (see References).
+
+An unknown project id, or a project without overrides for this plugin, returns `ctx.config`. A setting may list
+`"project"` only if the plugin reads it through `configFor` at use time. Project saves are always live and don't
+fire `onConfigChange` (they do run `onConfigCheck`, and a throw there is 400).
+
+A project view can still turn invalid without a project save: after a plugin upgrade, a hand edit to the config
+file or the project file, or a re-resolved ref. Core then drops that project's layer for the plugin (`configFor`
+returns `ctx.config`), logs a warning and reports it in `issues` for `GET ?project=`. The stored override is kept
+so the user can fix it; a project already listed in `issues` never blocks a user save.
+
+Rules for the project layer:
+
+- **Opt-in per setting.** The default scope is `["user"]`. Never offer project scope for settings that run
+  commands, pick executables, widen permissions or carry endpoints or credentials.
+- **No refs.** A project-layer value containing an unescaped `${` is rejected on save (400). `$${` stays literal
+  `${` in this layer (it is never resolved, so the unescape rule does not apply to it).
+- **Core-owned file.** Only the settings route writes `project-data/<project-id>/settings.json`; it is deleted when
+  the project or the plugin's overrides for it are gone. Hand edits to the file are picked up by the watcher,
+  re-validated, and dropped into `issues` when they fail. The file is JSON, same shape as `settings.json`.
+- **No workspace file in v3.** A file in the project's workspace would be repo content, which needs a trust model
+  first.
+
+Per-session values are not a layer. Sessions belong to valet-agent, which keeps them in `session.settings` (the
+model choice with effort and fast mode already does). No v3 setting declares a session scope.
+
+#### Migration
+
+```ts
+interface Migration {
+  from?: string;          // another setting id, or "kv:<key>" (a plugin_kv row); omitted: this setting, in place
+  map?:                   // value transform; omitted: copy as is
+    | { template: string }                    // old string spliced in at "{}", e.g. "${secret:{}}"
+    | { scale: number }                       // old number times scale
+    | { match: string }                       // regex; named groups that matched become an object; no match: dropped with a warning
+    | { values: Record<string, unknown> };    // lookup; unlisted old values are dropped with a warning
+}
+```
+
+- A migration needs an unambiguous trigger: the old value sits under `from`, or (in place) its storage kind differs
+  from the input's **and the stored value is not a form the input already accepts** — ref strings and valid unit
+  strings never trigger an in-place migration. A transform that keeps the storage kind (0–100 to 0–1, a secret name
+  to a ref) must rename the key.
+- Entries run in order on each layer before merging; the first that applies wins. If the new key already has a
+  value in that layer, the old one is dropped. The destination-exists check compares stored forms, so an in-place
+  migration transforms the old value rather than matching itself as "the new key already has a value".
+- Write-back: `settings.json` and project files are rewritten once (old key removed). Before the first rewrite,
+  core copies `settings.json` to `settings.json.bak`; restoring the backup is the downgrade path — a plugin rolled
+  back past a migration gets its old keys back by restoring `settings.json.bak` (core does this automatically when
+  a plugin fails schema validation on migrated-away keys whose doc no longer lists the migration). The config file
+  is never rewritten; core migrates it in memory on every load and logs a warning naming the old key. A `kv:` entry
+  applies to the user layer: the value moves to `settings.json` and its `plugin_kv` row is deleted.
+
+Moving from the earlier `configSchema` hints (`x-widget`, `x-section`, `x-page(s)`, `x-advanced`, `x-group`, `x-icon`, `x-order`, `enumNames`) and `settings@1` was all at once: every plugin with a `settings` doc moved in the same release, so `settings@1` and
+`settings@2` never coexist and the scope registry keeps one `settings` definition. `x-*` hints and `enumNames` map
+onto the doc mechanically. Existing per-project overrides outside `settings.plugins`
+(`project.settings.persona.maxBytesPerFile`, `project.settings.skills.enabled`, `project.settings.model`) stay
+where they are; the contextmanager pilots (`personaMaxBytesPerFile`, `skillsEnabled`) read the v3 project layer
+instead, and the older keys take precedence until they are removed. The `kv:` migration entries name the actual
+`plugin_kv` keys to move (claudecode/codex `preamble:<id>` caches are runtime state, not config, and stay).
+
+#### Compile
+
+Core compiles each `SettingsDoc` into the JSON Schema it validates against; the validator covers every constraint
+the doc can express, not a fixed subset:
+
+1. Each setting → a property; each input → its storage kind plus constraints: `min`/`max`/`exclusiveMin`/
+   `exclusiveMax`, `step`, `minLength`/`maxLength`, `pattern`, `minItems`/`maxItems` (list, multiselect), `map` key
+   rules (`propertyNames`), `enum` for static options, `variant` case shapes (discriminated on `tag`), `schemes`,
+   `mustExist`. `required` and `when` are checked by core after validation, not compiled.
+2. Inputs with `refs` accept a ref string or the storage type; unit types accept their unit strings.
+3. Pipeline per layer: load → migrate. Then merge → resolve `secret:`, `file:` and `env:` → parse units →
+   validate → required checks → the desired block, which becomes the applied block once accepted. `cmd:` is not
+   resolved here. A project snapshot is the project layer (parsed; it has no refs) merged over the applied user
+   block, then validate → required checks.
+
+Core reads only: `id`, `type` (storage kind, constraints, unit parser), `default`, `required`, `when`, `refs`,
+`ttl`, `scopes`, `migrate`. Everything else is for UIs. `when`/`required`/`Cond` are evaluated on stored text —
+before ref resolution — so core and UIs never disagree.
+
+A plugin may still ship a raw `configSchema` without `settings`; the UI shows a plain generated form, filed by
+`provides` (inference providers under inference, tool-only plugins under tools, the rest under system).
+`readonly` inputs reject writes (400). A manifest carrying both `settings` and `configSchema` uses `settings` and
+ignores `configSchema`.
+
+#### Control plane
+
+- `GET /api/core/settings/:plugin?project=<id>` and `GET /api/core/settings?project=<id>` add the project layer to
+  `values` and `sources`.
+- `PATCH /api/core/settings/:plugin` takes `{ scope?: "user" | "project", project?: string, config?, enabled? }`.
+  `scope` defaults to `user`; as today, `null` drops the layer's value. Project scope requires `project`, accepts
+  only settings that allow it, and rejects `enabled` and refs (400).
+- Validation is per changed key: a PATCH validates only the keys it touches (each through the same pipeline),
+  plus the `required` checks of settings whose conditions read a touched key, never the whole block — so a stale or broken stored key can't block an unrelated save, and
+  `{ enabled: false }` skips config validation entirely so a broken plugin can always be disabled.
+- User saves, project saves, reloads and watcher events (`file:` watches, `core.secrets.changed`, and edits to
+  `settings.json`, the config file, or `project-data/<project-id>/settings.json`) run one at a time on a single
+  queue. A save or a watch of one of those files drops the `cmd:` cache entries for refs stored in it. `cmd:` does
+  not run on the queue. Core's own saves (which rename a temp file over the target) trigger its own watcher the same
+  way an external edit does, so the queue stays single-source; watches are on directories and debounced, since
+  rename-over writes break file-level `fs.watch`.
+- A watcher event re-reads the file inside the queue slot before merging — never the cached overlay — so an external
+  edit raced with a queued save can't be silently overwritten.
+- A save runs the pipeline on the result, except `cmd:` (resolved on read, from the TTL cache; see References). A
+  schema or required failure is 400 and writes nothing. A `secret:`, `file:` or `env:` ref that fails to resolve
+  blocks the save only for a required setting; otherwise the save goes through and the error is reported. A
+  throwing `onConfigChange` does not reject the save (see Scopes); a throwing `onConfigCheck` does.
+- A user save is checked against every project that overrides this plugin **for the keys it touched**: each project
+  layer over the new desired user block must validate those keys, or the save is 400 with the failures keyed
+  `<projectId>:<path>`. Projects already in `issues` are skipped. Turning global `mode` to `basic` while a project
+  overrides `mode = "advanced"` and relies on the user's `budget` fails until the user fixes or clears the
+  override.
+- A project save is checked over the desired user block and, while they differ, the applied one too, so it stays
+  valid after a pending restart.
+- Error bodies key failures by `<path>` (or `<projectId>:<path>`) with a message per path; the raw ref text may
+  appear, resolved values never do.
 
 ```ts
 interface PluginSettings {
@@ -1118,16 +1506,70 @@ interface PluginSettings {
   provides: string[];
   state: "active" | "failed" | "disabled" | "pending";
   enabled: boolean;
-  schema?: Record<string, unknown>;    // the manifest's configSchema
-  values: Record<string, unknown>;     // effective block
-  sources: Record<string, "default" | "file" | "settings">;
-  restartRequired?: string;
+  settings?: SettingsDoc;               // the manifest's doc
+  types?: Record<string, { base: string } & Record<string, unknown>>;   // recipe chain for each non-primitive type used
+  schema?: Record<string, unknown>;     // the compiled (or raw) configSchema
+  values: Record<string, unknown>;      // stored values, migrated and unit-parsed; refs stay raw — this is the "desired" form for conditions
+  sources: Record<string, "default" | "file" | "settings" | "project">;
+  layers: { file?: Record<string, unknown>; user?: Record<string, unknown>; project?: Record<string, unknown> };   // stored, after migration
+  liveConfig: boolean;                  // the plugin has an onConfigChange listener
+  issues?: Record<Path, string>;        // ref failures and permission warnings
+  restartRequired?: string;             // scrubbed: resolved ref values replaced by their ${...} text
 }
 ```
 
-**UI hints.** A schema may carry hints beside standard JSON Schema (`title`, `description`, `default`, `enum`, `minimum`, `maximum`, `readOnly`, `format: "password"`). Core's validator ignores them. Keys a UI may use: `enumNames`; `x-widget` (`"textarea"`, `"secret"` for a string that names a secret the UI can set, `"model"` for a `ModelRef`, `"models"` for valet-agent's catalog, `"segmented"`); `x-advanced: true` (a collapsed Advanced section); `x-section` (a heading); `x-page` on a top-level property (another of the plugin's pages). On the schema root: `x-group` (`"system" | "inference" | "tools"`, listed in that order), `x-icon`, `x-order`, and `x-pages: { [id]: { title, description?, group?, icon?, order? } }`. Without `x-group` a UI files inference providers under inference, tool-only plugins under tools and the rest under system.
+#### Document rules
 
-**The `settings` scope** (`settings@1`, many, keyed by panel) is for what config can't hold: live view blocks (usage meters, connection state), actions, and forms whose values are not config (a password change). A panel shows on its plugin's page, or on one of its `x-pages` via `page`. Types are in the SDK's `settings.ts`: `SettingsPanel { title; description?; page?; schema?; get?; set?; view?; refreshMs?; actions? }` and the `SettingsBlock` union (`text`, `badge`, `stat`, `meter`, `table`, `button`, `group`).
+A document that breaks any of these fails its plugin at load, with the path and rule in the error:
+
+- Ids match the pattern above and are unique: subsection ids within a section, setting ids across the whole document, input ids within a `group` or `variant` case. A runtime subsection whose id equals a declared one in the same section is dropped by the UI with a warning.
+- Every section has at least one subsection; every setting has a `label` and an `input`; `variant` tags and `select`/`multiselect` static option values are unique.
+- `scopes` always includes `"user"` (a project-only setting is not allowed).
+- `deprecated` settings are still compiled and validated, and are exempt from `required`.
+- `readonly` is enforced: a PATCH that touches a readonly setting, or a readonly input inside a group, is 400.
+- A `map`'s `key` input takes no `refs`.
+- A `range` is `[lo, hi]` with `lo <= hi`.
+- Unit strings that don't parse (`"5x"` on a `duration`) are a validation error (400), not a soft failure.
+- The compiled schema sets `additionalProperties: false` on the block, so an unknown key in a save is 400; unknown keys in the config file are logged and ignored.
+- `when` in a project view is evaluated on the project layer merged over the user layers; an absent key and `null` are both "not set", and `eq`/`in` never match an absent key.
+- An `onConfigChange` listener must not save settings or write a file core watches for this plugin; core's own writes are deduplicated from its watcher events.
+
+#### Runtime
+
+`settings@2` (many, one provider per plugin, keyed by plugin id) holds what static config can't. Core never calls
+it; the UI plugin defines the scope, collects providers and serves them.
+
+```ts
+interface SettingsContribution {
+  options?: Record<string, (args: Record<string, unknown>) => Option[] | Promise<Option[]>>;
+  views?: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>>;   // display type's fields
+  actions?: Record<string, (args: Record<string, unknown>) => void | Promise<void>>;
+  subsections?: () => RuntimeSubsection[] | Promise<RuntimeSubsection[]>;
+}
+
+/** Not config: values live in the plugin (a password change). Core neither stores nor validates them. */
+interface RuntimeSubsection {
+  id: string;
+  label: string;
+  summary?: string;
+  order?: number;
+  section?: "system" | "inference" | "tools";   // which of the plugin's sections; default the first in its doc
+  items: (PanelField | Display)[];
+  refreshMs?: number;
+  get?(): Record<string, unknown> | Promise<Record<string, unknown>>;
+  set?(values: Record<string, unknown>): void | Promise<void>;
+}
+
+/** A setting without config semantics: no scopes, migrate, refs or apply. `masked` strings never echo the stored value back. */
+interface PanelField extends Omit<Setting, "input" | "scopes" | "migrate" | "apply"> {
+  input: Omit<InputBase, "refs" | "ttl"> & Record<string, unknown>;
+}
+```
+
+Live status (usage meters, connection state) is a runtime subsection of display types fed by views. Config that
+varies per entity (one block per MCP server) is a static `map` or `list` setting, not a runtime subsection.
+
+`settings@2` is the only `settings` scope version; `settings@1` (`SettingsPanel` / `SettingsBlock`) is gone. Like any scope, a provider sees its caller and may refuse one with `ServiceDeniedError`. The UI clamps `refreshMs` to at least 1000.
 
 ### 12.2 Secrets
 
@@ -1141,6 +1583,77 @@ interface PluginSettings {
 | `DELETE /api/core/secrets/:name` | removes the file |
 
 Names match `[A-Za-z0-9][A-Za-z0-9._-]*`. A write or delete sends the `core.secrets.changed` signal with the name, so a plugin can drop a cached client.
+
+#### References in settings
+
+Values may point at data core resolves: `${resolver:arg}`.
+
+```toml
+[plugins.valet-cursor.config]
+apiKey     = "${secret:cursor_api_key}"
+apiKey     = "${file:~/.config/cursor/key}"
+apiKey     = "${env:CURSOR_API_KEY}"
+apiKey     = "${cmd:op read op://dev/cursor/key}"
+authHeader = "Bearer ${secret:cursor_api_key}"
+baseUrl    = "https://${env:PROXY_HOST:-localhost}/v1"
+```
+
+| Resolver | Reads | Notes |
+|---|---|---|
+| `secret:name` | `<valetHome>/secrets/name`, then env `NAME` | today's `ctx.secrets` lookup |
+| `file:path` | file contents, trailing newline trimmed | absolute or `~` |
+| `env:NAME` | core's environment (under systemd, the unit's, not your shell's) | `${env:NAME:-fallback}` |
+| `cmd:line` | stdout, trimmed | `/bin/sh -c`, cwd `<valetHome>`, core's environment, no stdin, 10 s timeout; cached per ref text (see Rules) |
+
+Rules:
+
+- **Trust.** Settings are trusted input, the same as installing a plugin, so a `file:` ref reads and a `cmd:` ref
+  runs with core's authority.
+- **Syntax.** `${` starts a ref and the first `}` ends it; refs don't nest and the arg can't contain `}`. `$${` is a
+  literal `${`. A command that needs `}` goes in a script.
+- **Opt-in per input.** `${...}` is resolved only in inputs whose `refs` list the resolver. `secret` inputs accept
+  **only** `secret:` refs — a literal password or any other resolver on a `secret` input is 400. Every other input
+  allows no resolvers unless it lists them. Elsewhere `${` is literal text.
+- **Whole value or interpolation.** String-stored inputs may interpolate refs into a larger string. Other inputs
+  accept a ref only as the whole value; the resolved string goes through the input's parser (`"${env:PORT}"` → int).
+- **User layers only.** Refs are allowed in the config file and `settings.json`, never in the project layer.
+- **Schema defaults may hold refs.** `default: "${secret:cursor_api_key}"` is legal on an input whose `refs` allow
+  it; it is resolved like any stored ref. This is how cursor's `apiKey` keeps today's `secret` default.
+- **When refs resolve.** `secret:`, `file:` and `env:` resolve on load, all plugins in parallel, and the value is
+  reused until the ref text or the source changes. Core watches `file:` paths and listens to `core.secrets.changed`;
+  on change it re-resolves and fires `onConfigChange`. `env:` is fixed for the process.
+- **`cmd:` resolves asynchronously on read.** It never runs on load, save, reload, watch or the settings queue, and
+  it never blocks a read: `ctx.config` and `configFor` return the cached value (or the last good one; unset if
+  none) while a miss kicks off the command in the background. Concurrent reads of a cache miss share one in-flight
+  run. When a run completes and the value changed, core fires `onConfigChange` with the new desired block. A failed
+  run is not cached, so the next read tries again — but failures are cached for the TTL as "failed" so a broken
+  command doesn't respawn on every read. The cache is keyed by ref text (not by setting), so a `cmd:` inside a
+  `list`/`map`/`group` value, or two refs in one string, each cache independently. The TTL is 60s unless the input
+  that accepts the ref sets `ttl` (milliseconds). Saving or watching a file that stores the ref
+  (`<valetHome>/settings.json`, the config file) drops that ref's cache entry immediately; the command does not run
+  on that drop — the next read does. The timeout is the one in the table. A command that needs a terminal or an
+  interactive sign-in fails under systemd. The block handed to `onConfigChange` has `cmd:` as text.
+- **Plugins see resolved values** in `ctx.config` (`cmd:` from the cache). `ctx.secrets` stays for existing plugins.
+- **Raw out.** Core's own output (control plane, logs, validation errors, exports) carries the raw `${...}` and
+  never a resolved value; errors on ref-bearing inputs name the path and rule, not the value. Errors that carry a
+  plugin's own exception — `restartRequired`, `onConfigCheck`/`onConfigChange` failures, issues — are scrubbed
+  before they reach the UI or logs: any resolved `secret:`/`file:`/`env:`/`cmd:` value appearing in the message is
+  replaced by `${resolver:arg}`. A save writes the ref back. Core can't redact what a plugin logs itself, so plugins
+  must not log ref-bearing values.
+- **Permissions.** If a `secret:` or `file:` target is readable by group or others (mode other than `0600`), core
+  logs a warning and the UI shows it on the setting.
+- **Failure.** At load, a required setting whose `secret:`, `file:` or `env:` ref fails stops the plugin with
+  `<plugin>.<setting>: ${file:...} not found`; an optional one is treated as unset and the UI shows the error. A
+  later re-resolve that fails keeps the last good applied value and the UI shows the error. A `cmd:` failure never
+  rejects a save or stops the plugin: the read keeps the last good value, or is unset if there is none, and the
+  error is reported in `issues`. A listener that throws on a re-resolve follows the listener rule in Scopes.
+
+UI for a `secret` input: a source picker — Stored secret / Paste. Paste asks for a secret name (default
+`<pluginId>.<settingId>`, suffixed by group/list/map position when the input sits inside one, confirming before it
+replaces an existing one), writes the file (0600) through `PUT /api/core/secrets/:name`, and saves
+`${secret:<name>}`. Plaintext never reaches settings.json, and the picker is the only way a `secret` input gets a
+value.
+
 
 ## 13. Milestones
 

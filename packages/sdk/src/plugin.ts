@@ -20,11 +20,19 @@ export interface PluginContext<Config = unknown> {
     readonly dir: string;
     readonly manifest: PluginManifest;
   };
-  /** The plugin's current config block; reflects the latest successful reload. */
+  /** The applied user block (12.1 layers 1-3), refs resolved; `cmd:` values come from the cache. */
   readonly config: Config;
+  /** A project's view: its project layer over the applied user block. `ctx.config` for an unknown project or one without overrides. */
+  configFor(projectId: string): Config;
   /**
-   * Called after a reload changed this plugin's config block, with the validated new and previous values.
-   * Throw to say the change needs a restart. A plugin without a listener is reported as restart-required.
+   * Pre-save veto: runs before a save (user or project) is written, with the validated next and current blocks.
+   * Throw to reject the save (422 for a user save, 400 for a project save); nothing is written.
+   */
+  onConfigCheck(fn: (next: Config, prev: Config) => void | Promise<void>): void;
+  /**
+   * Runs after a user save, reload or ref re-resolve changed this plugin's desired block. `ctx.config` switches to
+   * `next` only once every listener has returned. A throw keeps the previous applied block and reports the error as
+   * restart-required; it never rejects the save. A plugin without a listener is reported as restart-required.
    */
   onConfigChange(fn: (next: Config, prev: Config) => void | Promise<void>): void;
   readonly log: Logger;

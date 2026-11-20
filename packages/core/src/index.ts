@@ -9,7 +9,7 @@ export * from "./log";
 export * from "./manifest";
 export * from "./scopes";
 export * from "./secrets";
-export * from "./settings";
+export * from "./settings/index";
 export { validateJsonSchema } from "./jsonschema";
 export * from "./store/index";
 export * from "./version";

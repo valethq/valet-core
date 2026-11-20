@@ -2,8 +2,6 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { join } from "node:path";
 import type { Logger, PluginManifest } from "@valethq/sdk";
 import type { ValetConfig } from "./config";
-import { validateJsonSchema } from "./jsonschema";
-import { withDefaults } from "./settings";
 import { validateManifest } from "./manifest";
 
 export type PluginState = "pending" | "active" | "failed" | "disabled";
@@ -80,8 +78,13 @@ export function discoverPlugins(config: ValetConfig, log: Logger): PluginRecord[
  * graph and produce the activation order. Marks `state`/`error` on every record.
  * Returns the plugins to activate, in order.
  */
-export function resolvePlugins(records: PluginRecord[], config: ValetConfig, log: Logger): PluginRecord[] {
-  // Disabled-by-config drop (step 1) then manifest + configSchema validation (step 2).
+export function resolvePlugins(
+  records: PluginRecord[],
+  config: ValetConfig,
+  log: Logger,
+  checkConfig: (rec: PluginRecord) => string | undefined = () => undefined,
+): PluginRecord[] {
+  // Disabled-by-config drop (step 1) then manifest and settings validation (step 2).
   for (const rec of records) {
     if (rec.state === "failed") continue;
     if (config.plugins[rec.id]?.enabled === false) {
@@ -94,13 +97,10 @@ export function resolvePlugins(records: PluginRecord[], config: ValetConfig, log
       rec.error = `invalid manifest: ${manifestErrors.join("; ")}`;
       continue;
     }
-    const schema = rec.manifest?.configSchema;
-    if (schema !== undefined) {
-      const errors = validateJsonSchema(withDefaults(schema, config.plugins[rec.id]?.config ?? {}), schema);
-      if (errors.length > 0) {
-        rec.state = "failed";
-        rec.error = `invalid plugin config: ${errors.join("; ")}`;
-      }
+    const configError = checkConfig(rec);
+    if (configError !== undefined) {
+      rec.state = "failed";
+      rec.error = configError;
     }
   }
 

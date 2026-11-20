@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "fx-baddoc",
+  "name": "Bad doc",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "settings": {
+    "sections": {
+      "system": {
+        "subsections": [
+          { "id": "a", "label": "A", "items": [{ "id": "x", "label": "X", "input": { "type": "fancy" } }] }
+        ]
+      }
+    }
+  }
+}

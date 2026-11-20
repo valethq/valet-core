@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "id": "fx-v3",
+  "name": "V3",
+  "version": "0.1.0",
+  "valet": "^0.1.0",
+  "main": "./index.ts",
+  "settings": {
+    "types": {
+      "local:hostport": { "base": "strict_string", "pattern": "^[^:]+:\\d{1,5}$", "patternHint": "host:port" }
+    },
+    "sections": {
+      "system": {
+        "icon": "gear",
+        "subsections": [
+          {
+            "id": "general",
+            "label": "General",
+            "items": [
+              { "type": "note", "text": "Fixture settings." },
+              {
+                "id": "mode",
+                "label": "Mode",
+                "input": {
+                  "type": "select",
+                  "options": [{ "value": "basic" }, { "value": "advanced" }],
+                  "default": "basic"
+                },
+                "scopes": ["user", "project"]
+              },
+              {
+                "id": "budget",
+                "label": "Budget",
+                "input": { "type": "tokens", "required": true },
+                "when": { "eq": ["mode", "advanced"] },
+                "scopes": ["user", "project"]
+              },
+              {
+                "id": "threshold",
+                "label": "Threshold",
+                "input": {
+                  "type": "percent",
+                  "exclusiveMin": 0,
+                  "max": 1,
+                  "default": 0.8,
+                  "style": "slider"
+                },
+                "scopes": ["user", "project"]
+              },
+              { "id": "timeout", "label": "Timeout", "input": { "type": "duration", "default": "5m" } },
+              {
+                "id": "maxBytes",
+                "label": "Max bytes",
+                "input": { "type": "bytes", "default": "64 KiB" },
+                "scopes": ["user", "project"]
+              },
+              { "id": "endpoint", "label": "Endpoint", "input": { "type": "local:hostport" } },
+              {
+                "id": "apiKey",
+                "label": "API key",
+                "input": { "type": "secret", "default": "${secret:fx_key}" },
+                "migrate": [{ "from": "apiKeySecret", "map": { "template": "${secret:{}}" } }]
+              },
+              {
+                "id": "header",
+                "label": "Header",
+                "input": { "type": "string", "refs": ["env", "file", "cmd"] }
+              },
+              { "id": "port", "label": "Port", "input": { "type": "int", "refs": ["env"] } },
+              {
+                "id": "locked",
+                "label": "Locked",
+                "input": { "type": "string", "readonly": true, "default": "fixed" }
+              }
+            ]
+          },
+          {
+            "id": "more",
+            "label": "More",
+            "items": [
+              {
+                "id": "utility",
+                "label": "Utility model",
+                "input": {
+                  "type": "group",
+                  "inputs": [
+                    { "id": "model", "type": "string" },
+                    { "id": "effort", "type": "select", "options": [{ "value": "low" }, { "value": "high" }] }
+                  ]
+                },
+                "migrate": [{ "map": { "match": "^(?<model>.*?)(?:-(?<effort>low|high))?$" } }]
+              },
+              {
+                "id": "noticeAt",
+                "label": "Notice at",
+                "input": { "type": "percent" },
+                "migrate": [{ "from": "noticePercent", "map": { "scale": 0.01 } }]
+              },
+              {
+                "id": "note",
+                "label": "Note",
+                "input": { "type": "string" },
+                "migrate": [{ "from": "kv:note" }]
+              },
+              {
+                "id": "aliases",
+                "label": "Aliases",
+                "input": { "type": "map", "value": { "type": "string" } }
+              },
+              {
+                "id": "servers",
+                "label": "Servers",
+                "advanced": true,
+                "input": {
+                  "type": "list",
+                  "max": 3,
+                  "item": {
+                    "type": "group",
+                    "inputs": [
+                      { "id": "name", "type": "string", "required": true },
+                      { "id": "url", "type": "url", "schemes": ["https"] },
+                      { "id": "region", "type": "string", "readonly": true }
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "pinned",
+                "label": "Pinned",
+                "input": { "type": "map", "value": { "type": "string", "readonly": true } }
+              },
+              {
+                "id": "extra",
+                "label": "Extra",
+                "input": { "type": "list", "item": { "type": "string", "refs": ["env", "cmd"] } }
+              },
+              {
+                "id": "transport",
+                "label": "Transport",
+                "input": {
+                  "type": "variant",
+                  "tag": "kind",
+                  "cases": [
+                    { "value": "stdio", "inputs": [{ "id": "command", "type": "string", "required": true }] },
+                    { "value": "http", "inputs": [{ "id": "url", "type": "url" }] }
+                  ]
+                }
+              },
+              {
+                "id": "tools",
+                "label": "Tools",
+                "input": { "type": "multiselect", "options": [{ "value": "a" }, { "value": "b" }] }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

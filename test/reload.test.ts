@@ -44,7 +44,7 @@ describe("config reload", () => {
     expect(live().calls).toEqual([]);
   });
 
-  test("a block that fails its configSchema rejects the whole reload", async () => {
+  test("a block that fails its schema keeps that plugin's config; the rest of the reload applies", async () => {
     const { kernel, home } = await up({ plugins: { "fx-live": { config: { n: 1 } } } });
     writeConfig(home, {
       server: { allowedOrigins: ["http://x"] },
@@ -55,7 +55,7 @@ describe("config reload", () => {
     expect(result.errors[0]).toContain('plugin "fx-live"');
     expect(live().ctx.config).toEqual({ n: 1 });
     expect(live().calls).toEqual([]);
-    expect(kernel.config.server.allowedOrigins).toEqual([]);
+    expect(kernel.config.server.allowedOrigins).toEqual(["http://x"]);
   });
 
   test("an unparseable file is rejected and the old config stays", async () => {
