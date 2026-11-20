@@ -385,6 +385,7 @@ export class SettingsService {
       this.dropCmdRefs(Object.values(config));
     }
     if (keys.length > 0) await this.applyDesired(e);
+    this.pruneCmd();
     this.refreshRefWatches();
   }
 
@@ -484,6 +485,7 @@ export class SettingsService {
         out.restartRequired.push({ plugin: e.rec.id, reason: e.restart });
     }
     this.flushMigrations();
+    this.pruneCmd();
     this.refreshRefWatches();
     return out;
   }
@@ -755,6 +757,15 @@ export class SettingsService {
     };
     values.forEach(walk);
     this.gen++;
+  }
+
+  /** Forgets cmd: cache entries that no plugin's desired or applied block still holds. */
+  private pruneCmd(): void {
+    const live = new Set<string>();
+    for (const e of this.entries.values())
+      for (const p of [...e.desired.res.pending, ...e.applied.res.pending])
+        for (const t of tokenize(p.raw)) if ("ref" in t && t.resolver === "cmd") live.add(t.ref);
+    this.cmd.retain(live);
   }
 
   private scrub(e: Entry, msg: string, res?: ResolveResult): string {

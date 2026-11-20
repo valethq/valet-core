@@ -228,6 +228,16 @@ describe("settings v3: saves", () => {
     expect(kernel.settingsService.cmd.peek("${cmd:printf a}")).toBeUndefined();
   });
 
+  test("a save that stops using a cmd ref forgets its cache entry", async () => {
+    const { kernel } = await up();
+    await kernel.updateSettings("fx-v3", { config: { header: "${cmd:printf a}" } });
+    void v3().ctx.config;
+    await kernel.settingsService.cmd.settle();
+    expect(kernel.settingsService.cmd.peek("${cmd:printf a}")).toBe("a");
+    await kernel.updateSettings("fx-v3", { config: { header: "plain" } });
+    expect(kernel.settingsService.cmd.peek("${cmd:printf a}")).toBeUndefined();
+  });
+
   test("onConfigCheck vetoes with 422 and nothing is written", async () => {
     const { kernel, home } = await up();
     await expect(kernel.updateSettings("fx-v3", { config: { header: "veto" } })).rejects.toMatchObject({

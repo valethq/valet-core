@@ -96,6 +96,11 @@ export class CmdCache {
     if (e) e.at = Number.NEGATIVE_INFINITY;
   }
 
+  /** Forgets every entry whose ref is not in `live`. */
+  retain(live: ReadonlySet<string>): void {
+    for (const ref of this.entries.keys()) if (!live.has(ref)) this.entries.delete(ref);
+  }
+
   /** Resolves once every in-flight run has finished (tests, shutdown). */
   async settle(): Promise<void> {
     await Promise.all([...this.entries.values()].map((e) => e.inflight));
