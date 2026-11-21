@@ -263,16 +263,18 @@ export function resolveBlock(
       let failedStoredSecret = false;
       for (const t of tokens) {
         if (!("ref" in t) || t.resolver === "cmd" || res.resolved.has(t.ref)) continue;
+        if (failed !== undefined && (t.resolver !== "secret" || !storedKeys.has(key))) continue;
         try {
           const r = resolve(t.resolver, t.arg, t.ref);
           res.resolved.set(t.ref, r.value);
           if (r.watch) res.watches.add(r.watch);
           if (r.warning) res.issues[path] = r.warning;
         } catch (e) {
-          failed = (e as Error).message;
-          failedStoredSecret = t.resolver === "secret" && storedKeys.has(key);
+          if (!failedStoredSecret) {
+            failed = (e as Error).message;
+            failedStoredSecret = t.resolver === "secret" && storedKeys.has(key);
+          }
           if (t.resolver === "file" && isAbsolute(expandHome(t.arg))) res.watches.add(expandHome(t.arg));
-          break;
         }
       }
       if (failed === undefined && tokens.some((t) => "ref" in t && t.resolver === "cmd")) {

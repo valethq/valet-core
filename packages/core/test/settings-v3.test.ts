@@ -337,6 +337,28 @@ describe("refs", () => {
     expect(resolveBlock(model, {}, missing).fatal).toEqual({});
   });
 
+  test("a failed earlier resolver cannot hide a missing stored secret", () => {
+    const model = buildModel(
+      manifest(doc([{ id: "key", label: "Key", input: { type: "string", refs: ["env", "secret"] } }])),
+    );
+    const calls: string[] = [];
+    const resolver = (name: string, arg: string, ref: string) => {
+      calls.push(ref);
+      return resolve(name, arg, ref);
+    };
+    const result = resolveBlock(model, { key: "${env:MISSING}${secret:gone}" }, resolver, new Set(["key"]));
+    expect(result.fatal).toEqual({ key: "key: ${secret:gone} not found" });
+    expect(result.block).toEqual({});
+    expect(result.issues).toEqual({});
+    expect(calls).toEqual(["${env:MISSING}", "${secret:gone}"]);
+    const present = resolveBlock(model, { key: "${env:MISSING}${secret:other}" }, resolver, new Set(["key"]));
+    expect(present.fatal).toEqual({});
+    expect(present.issues).toEqual({ key: "key: ${env:MISSING} not found" });
+    const defaults = resolveBlock(model, { key: "${env:MISSING}${secret:gone}" }, resolver);
+    expect(defaults.fatal).toEqual({});
+    expect(defaults.issues).toEqual({ key: "key: ${env:MISSING} not found" });
+  });
+
   test("stored optional file and env failures still produce issues, not fatal errors", () => {
     const model = buildModel(
       manifest(doc([{ id: "key", label: "Key", input: { type: "string", refs: ["file", "env"] } }])),
