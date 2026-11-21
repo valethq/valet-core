@@ -2,7 +2,7 @@ import type { Migration } from "@valethq/sdk";
 import type { StorageKind } from "./catalog";
 import type { Node } from "./doc";
 import type { Model } from "./model";
-import { refsIn } from "./refs";
+import { refsIn, tokenize } from "./refs";
 import { parseUnit } from "./units";
 
 type Block = Record<string, unknown>;
@@ -32,9 +32,28 @@ function accepts(node: Node, v: unknown): boolean {
 
 const NO_VALUE = Symbol("no value");
 
+function templatesRefArg(template: string): boolean {
+  let marker = "\u0000";
+  while (template.includes(marker)) marker += "\u0000";
+  try {
+    return tokenize(template.replaceAll("{}", marker)).some(
+      (token) => "ref" in token && token.arg.includes(marker),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function transform(map: Migration["map"], old: unknown): unknown {
   if (map === undefined) return old;
-  if ("template" in map) return typeof old === "string" ? map.template.replaceAll("{}", old) : NO_VALUE;
+  if ("template" in map) {
+    if (typeof old !== "string") return NO_VALUE;
+    // Interpolated refs take a name: padding is junk, and a blank arg means nothing to resolve, so the
+    // old value drops and the input's default fires. Generic templates substitute verbatim.
+    if (!templatesRefArg(map.template)) return map.template.replaceAll("{}", old);
+    const trimmed = old.trim();
+    return trimmed === "" ? NO_VALUE : map.template.replaceAll("{}", trimmed);
+  }
   if ("scale" in map) return typeof old === "number" ? old * map.scale : NO_VALUE;
   if ("match" in map) {
     if (typeof old !== "string") return NO_VALUE;

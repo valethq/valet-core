@@ -148,7 +148,8 @@ export function compileDoc(doc: unknown): CompiledDoc {
       }
       case "map": {
         const key = compileInput(f.key ?? { type: "string" }, `${at}.key`);
-        const value = compileInput(f.value, `${at}.value`);
+        // A map without `value` is a free-form object (arbitrary JSON keys and values).
+        const value = f.value === undefined ? undefined : compileInput(f.value, `${at}.value`);
         if (key && key.info.kind !== "string") err(at, "a map key must be string-stored");
         if (key && key.refs.length > 0) err(at, "a map key takes no refs");
         if (key) node.key = key;
@@ -327,7 +328,8 @@ export function nodeAt(
       if (seg === node.tag) return undefined;
       node = node.cases.flatMap((c) => c.inputs).find((n) => n.input.id === seg);
       if (node === undefined) return null;
-    } else if (node.value || node.item) {
+    } else if (node.value || node.item || node.info.primitive === "map" || node.info.primitive === "list") {
+      // A list item or map member (declared or free-form) is not statically checkable.
       return undefined;
     } else {
       return null;
