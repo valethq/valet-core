@@ -17,6 +17,7 @@ import {
   validateJsonSchema,
   validateValues,
 } from "../src/index";
+import { resolveBlock } from "../src/settings/model";
 
 const doc = (items: unknown[], extra: Record<string, unknown> = {}): SettingsDoc =>
   ({
@@ -288,6 +289,66 @@ describe("conditions", () => {
 });
 
 describe("refs", () => {
+  const secretModel = (required = false) =>
+    buildModel(
+      manifest(
+        doc([{ id: "key", label: "Key", input: { type: "secret", required, default: "${secret:other}" } }]),
+      ),
+    );
+  const resolve = (_resolver: string, arg: string, ref: string) => {
+    if (arg === "other") return { value: "other-value" };
+    throw new Error(`${ref} not found`);
+  };
+
+  test("a stored optional missing secret is fatal and never resolves the default secret", () => {
+    const calls: string[] = [];
+    const result = resolveBlock(
+      secretModel(),
+      { key: "${secret:gone}" },
+      (resolver, arg, ref) => {
+        calls.push(ref);
+        return resolve(resolver, arg, ref);
+      },
+      new Set(["key"]),
+    );
+    expect(result.fatal).toEqual({ key: "key: ${secret:gone} not found" });
+    expect(result.issues).toEqual({});
+    expect(result.block).toEqual({});
+    expect(calls).toEqual(["${secret:gone}"]);
+  });
+
+  test("only stored failures are newly fatal; defaults stay optional and required refs stay fatal", () => {
+    const model = secretModel();
+    const missing = (_resolver: string, _arg: string, ref: string): never => {
+      throw new Error(`${ref} not found`);
+    };
+    const defaults = resolveBlock(model, model.defaults, missing);
+    expect(defaults.block).toEqual({});
+    expect(defaults.fatal).toEqual({});
+    expect(defaults.issues).toEqual({ key: "key: ${secret:other} not found" });
+    expect(resolveBlock(model, model.defaults, missing, new Set(["key"])).fatal).toEqual({
+      key: "key: ${secret:other} not found",
+    });
+    const required = secretModel(true);
+    expect(resolveBlock(required, required.defaults, missing).fatal).toEqual({
+      key: "key: ${secret:other} not found",
+    });
+    expect(resolveBlock(model, model.defaults, resolve).block).toEqual({ key: "other-value" });
+    expect(resolveBlock(model, {}, missing).fatal).toEqual({});
+  });
+
+  test("stored optional file and env failures still produce issues, not fatal errors", () => {
+    const model = buildModel(
+      manifest(doc([{ id: "key", label: "Key", input: { type: "string", refs: ["file", "env"] } }])),
+    );
+    for (const ref of ["${file:/missing}", "${env:MISSING}"]) {
+      const result = resolveBlock(model, { key: ref }, resolve, new Set(["key"]));
+      expect(result.fatal).toEqual({});
+      expect(result.issues).toEqual({ key: `key: ${ref} not found` });
+      expect(result.block).toEqual({});
+    }
+  });
+
   test("tokenize: refs end at the first }, $${ is a literal ${", () => {
     expect(tokenize("Bearer ${secret:k}!")).toEqual([
       { lit: "Bearer " },
