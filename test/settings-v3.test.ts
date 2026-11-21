@@ -469,5 +469,10 @@ describe("settings v3: watchers", () => {
     expect(state(kernel, "fx-v3")?.state).toBe("active");
     expect(v3().ctx.config.apiKey).toBe("chosen-value");
     expect(v3().calls).toEqual([]);
+    await kernel.updateSettings("fx-v3", { config: { threshold: 0.4 } });
+    expect(v3().ctx.config.threshold).toBe(0.4);
+    expect(v3().ctx.config.apiKey).toBe("chosen-value");
+    expect(docOf(kernel)?.issues?.apiKey).toBe("apiKey: ${secret:chosen} not found");
+    expect(v3().calls.at(-1)?.apiKey).toBe("chosen-value");
   });
 });

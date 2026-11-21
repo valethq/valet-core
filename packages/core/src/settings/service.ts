@@ -367,6 +367,22 @@ export class SettingsService {
         Object.entries(res.fatal).filter(([p]) => keys.some((k) => under(p, k))),
       );
       if (Object.keys(fatal).length > 0) throw new SettingsError(400, firstLine(fatal), fatal);
+      const retained = new Set(
+        Object.keys(values).filter((k) => Object.keys(res.fatal).some((p) => under(p, k))),
+      );
+      for (const key of retained) {
+        if (key in e.applied.res.block) res.block[key] = e.applied.res.block[key];
+        else delete res.block[key];
+      }
+      if (retained.size > 0) {
+        res.pending = [
+          ...res.pending.filter((p) => !retained.has(p.key)),
+          ...e.applied.res.pending.filter((p) => retained.has(p.key)),
+        ];
+        for (const [ref, value] of e.applied.res.resolved)
+          if (!res.resolved.has(ref)) res.resolved.set(ref, value);
+        for (const watch of e.applied.res.watches) res.watches.add(watch);
+      }
       this.checkProjectsFor(e, model, values, keys);
       try {
         await e.hooks?.runChecks(res.block, e.applied.res.block);
@@ -375,7 +391,7 @@ export class SettingsService {
       }
       e.user = nextUser;
       e.desired = { values, res };
-      e.issues = { ...res.issues };
+      e.issues = { ...res.issues, ...res.fatal };
     }
     if (keys.length > 0 || patch.enabled !== undefined) {
       const fileEnabled = this.fileConfig.plugins[id]?.enabled;
