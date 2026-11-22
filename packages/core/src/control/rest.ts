@@ -283,13 +283,24 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
     r("POST", "/sessions", { permission: "core:session.write", manual: true }, async (req, ctx, store) => {
       const b = await body(req);
       if (typeof b.projectId !== "string") return errorJson(400, "bad_request", "projectId is required");
-      const project = store.projects.get(b.projectId);
-      if (!project) return errorJson(404, "not_found", "unknown project");
       const allowed = deps.can(ctx.caller, "core:session.write", {
         id: "session:new",
         ancestors: [`project:${b.projectId}`],
       });
       if (!allowed) return deniedJson({ by: "core", reason: "core:session.write denied for this project" });
+      if (!store.projects.get(b.projectId)) return errorJson(404, "not_found", "unknown project");
+      if (typeof b.parentSessionId === "string") {
+        const parentId = String(b.parentSessionId);
+        const parent = store.sessions.get(parentId);
+        const parentAllowed = deps.can(
+          ctx.caller,
+          "core:session.read",
+          parent ? sessionScope(parent.id, parent.projectId) : { id: `session:${parentId}` },
+        );
+        if (!parentAllowed)
+          return deniedJson({ by: "core", reason: "core:session.read denied for parent session" });
+        if (!parent) return errorJson(404, "not_found", "unknown parent session");
+      }
       return result(
         await store.sessions.create({
           projectId: b.projectId,
@@ -509,8 +520,13 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       const meta = deps.blobMeta(ctx.params.id as string);
       if (!meta) return errorJson(404, "not_found", "unknown blob");
       const path = deps.blobPath(ctx.params.id as string);
+      const mime = meta.mime ?? "application/octet-stream";
+      const html = mime.toLowerCase().includes("text/html");
       return new Response(Bun.file(path), {
-        headers: { "content-type": meta.mime ?? "application/octet-stream" },
+        headers: {
+          "content-type": html ? "application/octet-stream" : mime,
+          ...(html ? { "content-disposition": "attachment" } : {}),
+        },
       });
     }),
     r("POST", "/blobs", P("core:blob.write"), async (req, _ctx, store) => {

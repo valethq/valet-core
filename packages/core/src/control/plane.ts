@@ -262,7 +262,9 @@ export function createControlPlane(
     if (topic === "plugins") return check(caller, "core:plugin.read");
     if (topic.startsWith("session:")) {
       const id = topic.slice("session:".length);
-      return check(caller, "core:session.read", sessionScope(id, coreStore.sessions.get(id)?.projectId));
+      const scope = sessionScope(id, coreStore.sessions.get(id)?.projectId);
+      const read = check(caller, "core:session.read", scope);
+      return read.allow ? check(caller, "core:run.read", scope) : read;
     }
     if (topic.startsWith("sessions:"))
       return check(caller, "core:session.read", { id: `project:${topic.slice("sessions:".length)}` });

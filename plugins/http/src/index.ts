@@ -15,10 +15,14 @@ export default definePlugin<HttpConfig>({
     // reloads do not see it. Watch the file for allowedOrigins-only changes; host/port changes need a restart.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = (): void => {
-      const next = resolveListen(ctx.config, ctx.paths.valetHome);
-      if (next.host !== cfg.host || next.port !== cfg.port)
-        ctx.log.error("transport host/port change needs a restart", { host: next.host, port: next.port });
-      origins = next.allowedOrigins;
+      try {
+        const next = resolveListen(ctx.config, ctx.paths.valetHome);
+        if (next.host !== cfg.host || next.port !== cfg.port)
+          ctx.log.error("transport host/port change needs a restart", { host: next.host, port: next.port });
+        origins = next.allowedOrigins;
+      } catch (error) {
+        ctx.log.error("ignoring invalid transport config", { error: String(error) });
+      }
     };
     const watcher = watch(ctx.paths.valetHome, { persistent: false }, (_event, filename) => {
       if (filename !== "config.toml" && filename !== "config.json") return;

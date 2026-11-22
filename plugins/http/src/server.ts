@@ -89,7 +89,7 @@ export function listen(control: ControlPlane, cfg: Listen, log: Logger, origins:
     }
 
     const res = await control.dispatch(req);
-    if (path.startsWith("/plugins/") && res.headers.get("content-type")?.includes("text/html")) {
+    if (res.headers.get("content-type")?.includes("text/html")) {
       log.error("route returned text/html", { path });
       return finalize(error(500, "html_not_allowed", "control plane does not serve HTML"), origin);
     }
