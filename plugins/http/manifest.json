@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "valet-http",
+  "name": "HTTP",
+  "version": "0.1.0",
+  "description": "The HTTP and WebSocket listener for the control plane (transport@1). Core decides; this only listens.",
+  "repository": "https://github.com/valethq/valet-core",
+  "valet": "^0.1.1",
+  "main": "./src/index.ts",
+  "provides": ["transport@1"],
+  "events": { "namespace": "http" },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "host": { "type": "string" },
+      "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+      "allowedOrigins": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}

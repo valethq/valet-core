@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "valet-fixture-dup-b",
+  "name": "Dup b",
+  "version": "0.1.0",
+  "valet": "^0.1.1",
+  "main": "./index.ts",
+  "events": { "namespace": "dupns" },
+  "acl": { "permissions": { "thing": { "summary": "A thing" } } }
+}

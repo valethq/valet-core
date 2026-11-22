@@ -4,6 +4,7 @@ import {
   type CancelledResult,
   type Principal,
   type RequestContext,
+  type ResourceScope,
   ServiceDeniedError,
   type Session,
   type Store,
@@ -11,7 +12,7 @@ import {
 import { type PluginSettings, type PluginStatus, type ReloadResult, SettingsError } from "../kernel";
 import { deleteSecret, isSecretName, listSecretFiles, secretSource, writeSecret } from "../secrets";
 import type { SettingsPatch } from "../settings/overlay";
-import { ProjectInUseError } from "../store/store";
+import { LastOwnerError, ProjectInUseError } from "../store/store";
 import { FsError, listDirs, makeDir, normalizeDir } from "./fs";
 import { matchSegments, splitPath } from "./router";
 
@@ -73,6 +74,7 @@ async function guard(fn: () => Promise<Response>): Promise<Response> {
         error.message,
         error.errors === undefined ? {} : { errors: error.errors },
       );
+    if (error instanceof LastOwnerError) return errorJson(409, "last_owner", error.message);
     if (error instanceof ProjectInUseError)
       return errorJson(409, "in_use", error.message, { sessions: error.sessions });
     const message = error instanceof Error ? error.message : String(error);
@@ -100,11 +102,50 @@ function result<T>(value: T | CancelledResult, status = 200): Response {
 
 type RestHandler = (req: Request, ctx: RequestContext, store: Store) => Promise<Response>;
 
+/** The permission a core route checks in `dispatch`; `collection` routes filter each item instead. */
+export interface RestAcl {
+  permission: string;
+  resource?: (params: Record<string, string>, store: Store) => ResourceScope | undefined;
+  collection?: boolean;
+}
+
 interface RestRoute {
   method: string;
   pattern: string[];
+  acl: RestAcl;
   handler: RestHandler;
 }
+
+export const sessionScope = (id: string, projectId: string | undefined): ResourceScope => ({
+  id: `session:${id}`,
+  ...(projectId === undefined ? {} : { ancestors: [`project:${projectId}`] }),
+});
+
+const P = (permission: string, resource?: RestAcl["resource"]): RestAcl => ({
+  permission,
+  ...(resource === undefined ? {} : { resource }),
+});
+const C = (permission: string): RestAcl => ({ permission, collection: true });
+const project: RestAcl["resource"] = (params) => ({ id: `project:${params.id}` });
+const plugin: RestAcl["resource"] = (params) => ({ id: `plugin:${params.plugin}` });
+const session: RestAcl["resource"] = (params, store) =>
+  sessionScope(params.id as string, store.sessions.get(params.id as string)?.projectId);
+const runSession = (store: Store, runId: string | undefined): ResourceScope | undefined => {
+  const run = runId === undefined ? undefined : store.runs.get(runId);
+  return run === undefined
+    ? undefined
+    : sessionScope(run.sessionId, store.sessions.get(run.sessionId)?.projectId);
+};
+const messageSession = (
+  deps: RestDeps,
+  store: Store,
+  messageId: string | undefined,
+): ResourceScope | undefined => {
+  const sessionId = messageId === undefined ? undefined : deps.messageSession(messageId);
+  return sessionId === undefined
+    ? undefined
+    : sessionScope(sessionId, store.sessions.get(sessionId)?.projectId);
+};
 
 type QueryNum = number | undefined | Response;
 
@@ -132,18 +173,29 @@ export interface RestDeps {
   /** Raw db handle for blob metadata (the Store API exposes only put/path). */
   blobMeta(id: string): { sha256: string; mime: string | null; name: string | null } | undefined;
   blobPath(id: string): string;
+  /** The session a message belongs to (resource resolution for `/messages/:id/complete`). */
+  messageSession(messageId: string): string | undefined;
+  /** `can` for collection filtering. */
+  can(caller: Caller, permission: string, resource?: ResourceScope): boolean;
 }
 
 export function restRoutes(deps: RestDeps): RestRoute[] {
-  const r = (method: string, pattern: string, handler: RestHandler): RestRoute => ({
+  const r = (method: string, pattern: string, acl: RestAcl, handler: RestHandler): RestRoute => ({
     method,
     pattern: splitPath(pattern),
+    acl,
     handler,
   });
 
   return [
-    r("GET", "/projects", async (_req, _ctx, store) => json(store.projects.list())),
-    r("POST", "/projects", async (req, _ctx, store) => {
+    r("GET", "/projects", C("core:project.read"), async (_req, ctx, store) =>
+      json(
+        store.projects
+          .list()
+          .filter((p) => deps.can(ctx.caller, "core:project.read", { id: `project:${p.id}` })),
+      ),
+    ),
+    r("POST", "/projects", P("core:project.write"), async (req, _ctx, store) => {
       const b = await body(req);
       if (typeof b.workspaceDir !== "string" || (b.name !== undefined && typeof b.name !== "string")) {
         return errorJson(400, "bad_request", "workspaceDir is required; name must be a string");
@@ -162,11 +214,11 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         201,
       );
     }),
-    r("GET", "/projects/:id", async (_req, ctx, store) => {
+    r("GET", "/projects/:id", P("core:project.read", project), async (_req, ctx, store) => {
       const project = store.projects.get(ctx.params.id as string);
       return project ? json(project) : errorJson(404, "not_found", "unknown project");
     }),
-    r("PATCH", "/projects/:id", async (req, ctx, store) => {
+    r("PATCH", "/projects/:id", P("core:project.write", project), async (req, ctx, store) => {
       if (!store.projects.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown project");
       const b = await body(req);
       const patch: { name?: string; workspaceDir?: string; settings?: Record<string, unknown> } = {};
@@ -181,15 +233,15 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (b.settings !== undefined) patch.settings = b.settings as Record<string, unknown>;
       return result(await store.projects.update(ctx.params.id as string, patch));
     }),
-    r("DELETE", "/projects/:id", async (_req, ctx, store) => {
+    r("DELETE", "/projects/:id", P("core:project.write", project), async (_req, ctx, store) => {
       if (!store.projects.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown project");
       return result(await store.projects.delete(ctx.params.id as string));
     }),
-    r("GET", "/fs/list", async (req) => {
+    r("GET", "/fs/list", P("core:fs.read"), async (req) => {
       const q = new URL(req.url).searchParams;
       return json(await listDirs(q.get("path"), q.get("hidden") === "1"));
     }),
-    r("POST", "/fs/mkdir", async (req) => {
+    r("POST", "/fs/mkdir", P("core:fs.write"), async (req) => {
       const b = await body(req);
       if (typeof b.parent !== "string" || typeof b.name !== "string") {
         return errorJson(400, "bad_request", "parent and name are required strings");
@@ -197,22 +249,25 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       return json({ path: await makeDir(b.parent, b.name) }, 201);
     }),
 
-    r("GET", "/sessions", async (req, _ctx, store) => {
+    r("GET", "/sessions", C("core:session.read"), async (req, ctx, store) => {
       const q = new URL(req.url).searchParams;
       const limit = parseLimit(q.get("limit"));
       if (limit instanceof Response) return limit;
       const before = parseFiniteQuery(q.get("before"), "before");
       if (before instanceof Response) return before;
+      // spec-gap: filtering after `limit` can return fewer rows than asked for.
       return json(
-        store.sessions.list({
-          ...(q.get("projectId") === null ? {} : { projectId: q.get("projectId") as string }),
-          ...(q.get("status") === null ? {} : { status: q.get("status") as Session["status"] }),
-          ...(limit === undefined ? {} : { limit }),
-          ...(before === undefined ? {} : { before }),
-        }),
+        store.sessions
+          .list({
+            ...(q.get("projectId") === null ? {} : { projectId: q.get("projectId") as string }),
+            ...(q.get("status") === null ? {} : { status: q.get("status") as Session["status"] }),
+            ...(limit === undefined ? {} : { limit }),
+            ...(before === undefined ? {} : { before }),
+          })
+          .filter((sess) => deps.can(ctx.caller, "core:session.read", sessionScope(sess.id, sess.projectId))),
       );
     }),
-    r("POST", "/sessions", async (req, _ctx, store) => {
+    r("POST", "/sessions", P("core:session.write"), async (req, _ctx, store) => {
       const b = await body(req);
       if (typeof b.projectId !== "string") return errorJson(400, "bad_request", "projectId is required");
       if (!store.projects.get(b.projectId)) return errorJson(404, "not_found", "unknown project");
@@ -226,11 +281,11 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         201,
       );
     }),
-    r("GET", "/sessions/:id", async (_req, ctx, store) => {
+    r("GET", "/sessions/:id", P("core:session.read", session), async (_req, ctx, store) => {
       const session = store.sessions.get(ctx.params.id as string);
       return session ? json(session) : errorJson(404, "not_found", "unknown session");
     }),
-    r("PATCH", "/sessions/:id", async (req, ctx, store) => {
+    r("PATCH", "/sessions/:id", P("core:session.write", session), async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const b = await body(req);
       const patch: Partial<Pick<Session, "title" | "color" | "status" | "settings">> = {};
@@ -240,11 +295,11 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (b.settings !== undefined) patch.settings = b.settings as Session["settings"];
       return result(await store.sessions.update(ctx.params.id as string, patch));
     }),
-    r("DELETE", "/sessions/:id", async (_req, ctx, store) => {
+    r("DELETE", "/sessions/:id", P("core:session.write", session), async (_req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       return result(await store.sessions.delete(ctx.params.id as string));
     }),
-    r("GET", "/sessions/:id/messages", async (req, ctx, store) => {
+    r("GET", "/sessions/:id/messages", P("core:session.read", session), async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const q = new URL(req.url).searchParams;
       const beforeSeq = parseFiniteQuery(q.get("beforeSeq"), "beforeSeq");
@@ -258,7 +313,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         }),
       );
     }),
-    r("POST", "/sessions/:id/messages", async (req, ctx, store) => {
+    r("POST", "/sessions/:id/messages", P("core:message.write", session), async (req, ctx, store) => {
       if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
       const b = await body(req);
       if (typeof b.role !== "string" || !Array.isArray(b.parts)) {
@@ -288,38 +343,58 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         201,
       );
     }),
-    r("POST", "/messages/:id/complete", async (req, ctx, store) => {
-      const b = await body(req);
-      const status = (b.status ?? "complete") as "complete" | "error" | "interrupted";
-      if (!["complete", "error", "interrupted"].includes(status)) {
-        return errorJson(400, "bad_request", "status must be complete, error or interrupted");
-      }
-      await store.messages.complete(ctx.params.id as string, status);
-      return json({ ok: true });
-    }),
+    r(
+      "POST",
+      "/messages/:id/complete",
+      P("core:message.write", (params, store) => messageSession(deps, store, params.id)),
+      async (req, ctx, store) => {
+        const b = await body(req);
+        const status = (b.status ?? "complete") as "complete" | "error" | "interrupted";
+        if (!["complete", "error", "interrupted"].includes(status)) {
+          return errorJson(400, "bad_request", "status must be complete, error or interrupted");
+        }
+        await store.messages.complete(ctx.params.id as string, status);
+        return json({ ok: true });
+      },
+    ),
 
-    r("GET", "/runs/:id", async (_req, ctx, store) => {
-      const run = store.runs.get(ctx.params.id as string);
-      return run ? json(run) : errorJson(404, "not_found", "unknown run");
-    }),
-    r("POST", "/runs/:id/cancel", async (_req, ctx, store) => {
-      await store.runs.cancel(ctx.params.id as string, ctx.caller.actor?.principalId ?? "core");
-      return json({ ok: true });
-    }),
+    r(
+      "GET",
+      "/runs/:id",
+      P("core:run.read", (params, store) => runSession(store, params.id)),
+      async (_req, ctx, store) => {
+        const run = store.runs.get(ctx.params.id as string);
+        return run ? json(run) : errorJson(404, "not_found", "unknown run");
+      },
+    ),
+    r(
+      "POST",
+      "/runs/:id/cancel",
+      P("core:run.cancel", (params, store) => runSession(store, params.id)),
+      async (_req, ctx, store) => {
+        await store.runs.cancel(ctx.params.id as string, ctx.caller.actor?.principalId ?? "core");
+        return json({ ok: true });
+      },
+    ),
 
-    r("GET", "/principals/:id", async (_req, ctx, store) => {
+    r("GET", "/principals/:id", P("core:principal.read"), async (_req, ctx, store) => {
       const principal = store.principals.get(ctx.params.id as string);
       return principal ? json(principal) : errorJson(404, "not_found", "unknown principal");
     }),
-    r("POST", "/principals/:id/link", async (req, ctx, store) => {
+    r("POST", "/principals/:id/link", P("core:principal.admin"), async (req, ctx, store) => {
       const b = await body(req);
       if (typeof b.platform !== "string" || typeof b.externalId !== "string") {
         return errorJson(400, "bad_request", "platform and externalId are required strings");
       }
-      await store.principals.link(ctx.params.id as string, b.platform, b.externalId);
+      await store.principals.link(
+        ctx.params.id as string,
+        b.platform,
+        b.externalId,
+        typeof b.code === "string" ? { code: b.code } : undefined,
+      );
       return json({ ok: true });
     }),
-    r("POST", "/principals/:id/role", async (req, ctx, store) => {
+    r("POST", "/principals/:id/role", P("core:principal.admin"), async (req, ctx, store) => {
       const b = await body(req);
       if (!["owner", "trusted", "guest"].includes(b.role as string)) {
         return errorJson(400, "bad_request", "role must be owner, trusted or guest");
@@ -328,19 +403,32 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       return json({ ok: true });
     }),
 
-    r("GET", "/plugins", async () => json(deps.plugins())),
-    r("GET", "/part-types", async (_req, _ctx, store) => json(store.partTypes.list())),
-    r("POST", "/config/reload", async () => {
+    r("POST", "/principals/:id/link-challenge", P("core:principal.link"), async (_req, ctx, store) => {
+      const self = ctx.caller.actor?.principalId;
+      if (self === undefined || (ctx.params.id !== "me" && ctx.params.id !== self))
+        return deniedJson({ by: "core", reason: "a link challenge is only minted for your own principal" });
+      return json({ code: store.principals.linkChallenge(self), expiresInSec: 600 }, 201);
+    }),
+
+    r("GET", "/plugins", P("core:plugin.read"), async () => json(deps.plugins())),
+    r("GET", "/part-types", P("core:plugin.read"), async (_req, _ctx, store) => json(store.partTypes.list())),
+    r("POST", "/config/reload", P("core:config.reload"), async () => {
       const result = await deps.reload();
       return json(result, result.ok ? 200 : 400);
     }),
 
-    r("GET", "/settings", async (req) => json(deps.settings(projectParam(req)))),
-    r("GET", "/settings/:plugin", async (req, ctx) => {
+    r("GET", "/settings", C("core:settings.read"), async (req, ctx) =>
+      json(
+        deps
+          .settings(projectParam(req))
+          .filter((p) => deps.can(ctx.caller, "core:settings.read", { id: `plugin:${p.plugin}` })),
+      ),
+    ),
+    r("GET", "/settings/:plugin", P("core:settings.read", plugin), async (req, ctx) => {
       const found = deps.settings(projectParam(req)).find((p) => p.plugin === ctx.params.plugin);
       return found ? json(found) : errorJson(404, "not_found", "unknown plugin");
     }),
-    r("PATCH", "/settings/:plugin", async (req, ctx) => {
+    r("PATCH", "/settings/:plugin", P("core:settings.write", plugin), async (req, ctx) => {
       const b = await body(req);
       const config = b.config;
       if (config !== undefined && (typeof config !== "object" || config === null || Array.isArray(config)))
@@ -360,15 +448,15 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       return json(await deps.updateSettings(ctx.params.plugin as string, patch));
     }),
 
-    r("GET", "/secrets", async () =>
+    r("GET", "/secrets", P("core:secret.read"), async () =>
       json(listSecretFiles(deps.valetHome).map((name) => ({ name, source: "file" }))),
     ),
-    r("GET", "/secrets/:name", async (_req, ctx) => {
+    r("GET", "/secrets/:name", P("core:secret.read"), async (_req, ctx) => {
       const name = ctx.params.name as string;
       if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
       return json({ name, source: secretSource(deps.valetHome, name) });
     }),
-    r("PUT", "/secrets/:name", async (req, ctx) => {
+    r("PUT", "/secrets/:name", P("core:secret.write"), async (req, ctx) => {
       const name = ctx.params.name as string;
       const b = await body(req);
       if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
@@ -378,14 +466,14 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       deps.secretChanged(name);
       return json({ name, source: "file" });
     }),
-    r("DELETE", "/secrets/:name", async (_req, ctx) => {
+    r("DELETE", "/secrets/:name", P("core:secret.write"), async (_req, ctx) => {
       const name = ctx.params.name as string;
       if (!isSecretName(name)) return errorJson(400, "bad_request", "invalid secret name");
       if (deleteSecret(deps.valetHome, name)) deps.secretChanged(name);
       return json({ name, source: secretSource(deps.valetHome, name) });
     }),
 
-    r("GET", "/blobs/:id", async (_req, ctx) => {
+    r("GET", "/blobs/:id", P("core:blob.read"), async (_req, ctx) => {
       const meta = deps.blobMeta(ctx.params.id as string);
       if (!meta) return errorJson(404, "not_found", "unknown blob");
       const path = deps.blobPath(ctx.params.id as string);
@@ -393,7 +481,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         headers: { "content-type": meta.mime ?? "application/octet-stream" },
       });
     }),
-    r("POST", "/blobs", async (req, _ctx, store) => {
+    r("POST", "/blobs", P("core:blob.write"), async (req, _ctx, store) => {
       const b = await body(req);
       if (typeof b.data !== "string") return errorJson(400, "bad_request", "data (base64) is required");
       const bytes = Buffer.from(b.data, "base64");
@@ -412,27 +500,23 @@ export function matchRest(
   deps: RestDeps,
   method: string,
   path: string,
-): { handler: RestHandler; params: Record<string, string> } | undefined {
+): { handler: RestHandler; acl: RestAcl; params: Record<string, string> } | undefined {
   const segments = splitPath(path).slice(2); // strip "api", "core"
   for (const route of restRoutes(deps)) {
     if (route.method !== method) continue;
     const params = matchSegments(route.pattern, segments);
-    if (params) return { handler: route.handler, params };
+    if (params) return { handler: route.handler, acl: route.acl, params };
   }
   return undefined;
 }
 
-/** Wraps a core REST handler: builds the caller-scoped store and maps failures. */
-export function dispatchRest(
-  deps: RestDeps,
+/** Wraps a matched core REST handler: builds the caller-scoped store and maps failures. */
+export function runRest(
+  match: { handler: RestHandler; params: Record<string, string> },
   store: { forCaller(caller: Caller): Store },
-  method: string,
-  path: string,
   req: Request,
   ctx: RequestContext,
 ): Promise<Response> {
-  const match = matchRest(deps, method, path);
-  if (!match) return Promise.resolve(errorJson(404, "not_found", "not found"));
   const boundCtx: RequestContext = { ...ctx, params: match.params };
   return guard(() => match.handler(req, boundCtx, store.forCaller(ctx.caller)));
 }

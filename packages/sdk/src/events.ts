@@ -1,4 +1,6 @@
+import type { Audience } from "./acl";
 import type { Disposable } from "./plugin";
+import type { ActorRef } from "./store";
 import type { Role } from "./tools";
 
 export type HookPhase = "before" | "after";
@@ -16,14 +18,34 @@ export interface Caller {
   /** The emitting, writing or calling plugin's id, or "core" (boot recovery, control-plane requests). */
   readonly plugin: string;
   /**
-   * The principal this is on behalf of, if any. Inside a run, `role` is the run's effective role (section 8.3).
-   * A plugin claims it (via `store.as()` or a message author), or an identity provider proves it. Hooks decide whether to believe it.
+   * The principal this is on behalf of, if any. `role` is the principal's stored role; a run narrows it with
+   * `cap` and `audience` (section 8.3). A plugin claims it (via `store.as()` or a message author), or an identity
+   * provider proves it. Hooks decide whether to believe it.
    */
-  readonly actor?: { readonly principalId: string; readonly role: Role };
+  readonly actor?: {
+    readonly principalId: string;
+    readonly role: Role; // the principal's stored role
+    /** Labels of a non-human credential (see Tokens). */
+    readonly tags?: readonly string[];
+    /** Permission patterns this credential or run is limited to. Absent means uncapped. */
+    readonly cap?: readonly string[];
+    /** Who can see the output. Absent means the principal alone. */
+    readonly audience?: Audience;
+    /** The run this action belongs to. */
+    readonly runId?: string;
+  };
   /** Control-plane requests only: the identity@1 provider that authenticated the request. */
   readonly authenticatedBy?: string;
+  /** Opaque identity-provider credential reference, stamped by core. */
+  readonly credentialId?: string;
+  /** Stamped only from verified login evidence supplied by an identity provider. */
+  readonly verifiedLogin?: boolean;
   /** Set on re-entrant emits: the event whose hook caused this one. */
   readonly cause?: { readonly event: string; readonly plugin: string };
+}
+export interface EmitOptions {
+  /** Stamps this actor on `caller.actor` like `store.as()`; a `runId` stamps the run's subject. */
+  as?: ActorRef;
 }
 export interface Denial {
   readonly by: string;
@@ -80,7 +102,11 @@ export interface PluginEventBus {
     opts?: HookOptions,
   ): Subscription;
   /** Only for events in this plugin's namespace; core events are emitted by core actions. */
-  emit<N extends EvName>(name: N, payload: ValetEvents[N]): Promise<EmitResult<ValetEvents[N]>>;
+  emit<N extends EvName>(
+    name: N,
+    payload: ValetEvents[N],
+    opts?: EmitOptions,
+  ): Promise<EmitResult<ValetEvents[N]>>;
   onSignal<N extends SigName>(name: N, fn: (payload: ValetSignals[N], caller: Caller) => void): Subscription;
   signal<N extends SigName>(name: N, payload: ValetSignals[N]): void;
   /** Decide which plugins may hook or observe this plugin's namespace. Checked when a hook subscribes. */

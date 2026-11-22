@@ -1,9 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import type { PluginSettings, ValetPlugin } from "@valethq/sdk";
+import { type ControlPlane, ControlRefusedError, type PluginSettings, type ValetPlugin } from "@valethq/sdk";
+import { createAclRegistry } from "./acl";
 import { createCoreBus } from "./bus";
 import type { CoreBus } from "./bus/types";
 import { type ValetConfig, defaultValetHome, loadConfig, sameConfig } from "./config";
+import { type CorePlane, createControlPlane } from "./control/plane";
+import { errorJson } from "./control/rest";
 import { type CtxDeps, type PluginRuntime, buildPluginContext } from "./ctx";
 import { type HttpRegistry, type WsRegistry, createHttpRegistry, createWsRegistry } from "./hosts";
 import { type PluginRecord, discoverPlugins, resolvePlugins, unmetAtActivation } from "./loader";
@@ -57,6 +60,8 @@ export interface BootOptions {
   out?: (line: string) => void;
   /** Runs after the bus is created and before plugins load (tests). */
   tapBus?: (bus: CoreBus) => void;
+  /** spec-gap: WS ring-buffer size per topic (default 2000), overridable so tests can exercise gap replay. */
+  ringSize?: number;
 }
 
 export interface ValetKernel {
@@ -69,6 +74,8 @@ export interface ValetKernel {
   readonly http: HttpRegistry;
   readonly ws: WsRegistry;
   readonly log: CoreLogger;
+  /** `dispatch`/`connect` for transports, and the topic hub; available once boot has finished. */
+  readonly control: CorePlane;
   /** Each plugin's state, error and load order (5.2: GET /api/core/plugins). */
   plugins(): PluginStatus[];
   /** spec-gap: re-reads the config file, validates it, and applies what can change live; rejects the whole reload on any error. */
@@ -186,9 +193,24 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
 
     const scopes = createScopeRegistry({ logger: coreLog, winners: config.scopes });
     for (const def of CORE_SCOPE_DEFS) scopes.define(def);
-    const http = createHttpRegistry(config.server);
+    const acl = createAclRegistry({ scopes, logger: coreLog });
+    const coreScopes = scopes.forPlugin("core", []);
+    // ctx.http.url(): the transport named in config.scopes, else the first loaded, else the built-in listener.
+    const baseUrl = (): string => {
+      const providers = coreScopes.all("transport");
+      const winner = config.scopes["transport@1"] ?? config.scopes.transport;
+      const chosen = providers.find((p) => p.plugin === winner || p.key === winner) ?? providers[0];
+      return chosen?.impl.baseUrl() ?? `http://${config.server.host}:${config.server.port}`;
+    };
+    const http = createHttpRegistry(baseUrl);
     const ws = createWsRegistry();
-    const ctxDeps: CtxDeps = { valetHome, bus, store, scopes, http, ws, log };
+    let plane: CorePlane | undefined;
+    const early = () => errorJson(503, "starting", "valet is starting");
+    const control: ControlPlane = {
+      dispatch: (req) => (plane ? plane.dispatch(req) : Promise.resolve(early())),
+      connect: (req) => (plane ? plane.connect(req) : Promise.reject(new ControlRefusedError(early()))),
+    };
+    const ctxDeps: CtxDeps = { valetHome, bus, store, scopes, http, ws, log, acl: acl.host, control };
 
     const records = discoverPlugins(config, coreLog);
     const byId = new Map(records.map((r) => [r.id, r]));
@@ -217,6 +239,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         const manifest = rec.manifest;
         if (!manifest) throw new Error("manifest missing at activation");
         const id = rec.id;
+        acl.register(id, manifest.events?.namespace ?? id.replace(/^valet-/, ""), manifest.acl);
         runtime = buildPluginContext(
           ctxDeps,
           { id, version: manifest.version, dir: rec.dir, manifest },
@@ -234,6 +257,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         rec.state = "failed";
         rec.error = errorMessage(error);
         service.detach(rec.id);
+        acl.unregister(rec.id);
         coreLog.error(`plugin "${rec.id}" failed to activate: ${rec.error}`, { plugin: rec.id });
         // 5.2 step 5: abort, then dispose, so a late activate cannot register hooks.
         if (runtime !== undefined) {
@@ -356,6 +380,10 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       http,
       ws,
       log,
+      get control(): CorePlane {
+        if (plane === undefined) throw new Error("control plane not ready");
+        return plane;
+      },
       plugins() {
         return records
           .filter((r) => r.state !== "pending")
@@ -380,6 +408,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
       async shutdown() {
         if (closing) return;
         closing = true;
+        plane?.close();
         service.close();
         // 5.2 step 7: core.shutdown, then deactivate in reverse order (5s each).
         // Abort each ctx.signal before deactivate so the plugin can observe it.
@@ -395,6 +424,7 @@ export async function boot(opts: BootOptions = {}): Promise<ValetKernel> {
         store.close();
       },
     };
+    plane = createControlPlane(kernel, acl, opts.ringSize === undefined ? {} : { ringSize: opts.ringSize });
     return kernel;
   } catch (error) {
     service.close();

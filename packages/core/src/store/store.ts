@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Database } from "bun:sqlite";
 import {
+  type ActorRef,
   type Caller,
   type CancelledResult,
   type ChannelBinding,
@@ -15,13 +16,17 @@ import {
   type Principal,
   type Project,
   type Role,
+  type LinkProof,
   type Run,
+  type RunSubject,
   ServiceDeniedError,
   type Session,
   type SessionSettings,
   type Store,
   type ValetEvents,
+  lowestRole,
 } from "@valethq/sdk";
+import { roleOf, stampActor, subjectCaller, subjectRole } from "./actor";
 import type { CoreBus } from "../bus/types";
 import { newId } from "./ids";
 import type { PartTypeRegistry, PluginOrigin } from "./parttypes";
@@ -93,6 +98,18 @@ function cancelledResult(cancelReason: string | undefined, denied: Denial | unde
 }
 
 /** The Store view one caller sees; mutating actions emit the matching 7.3 core event. */
+export class LastOwnerError extends Error {
+  constructor(readonly principalId: string) {
+    super("cannot demote the last owner");
+  }
+}
+
+const LINK_TTL_MS = 10 * 60_000;
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const randomCode = (): string =>
+  [...crypto.getRandomValues(new Uint8Array(8))].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
+const hashCode = (code: string): string => new Bun.CryptoHasher("sha256").update(code).digest("hex");
+
 export class ProjectInUseError extends Error {
   constructor(
     readonly projectId: string,
@@ -121,18 +138,12 @@ export class StoreView implements Store {
   }
 
   #roleOf(principalId: string): Role | undefined {
-    const row = this.#deps.db
-      .query<{ role: string }, string>("SELECT role FROM principals WHERE id = ?")
-      .get(principalId);
-    return row?.role as Role | undefined;
+    return roleOf(this.#deps.db, principalId);
   }
 
-  /** 8.4: the claim is vouched for by the plugin id; hooks see plugin and actor. */
-  as(actor: { principalId: string }): Store {
-    const role = this.#roleOf(actor.principalId);
-    // spec-gap: claiming a principal that does not exist is a bug; fail loudly.
-    if (role === undefined) throw new Error(`store.as: unknown principal "${actor.principalId}"`);
-    return new StoreView(this.#deps, { ...this.#caller, actor: { principalId: actor.principalId, role } });
+  /** 8.4: the claim is vouched for by the plugin id; hooks see plugin and actor. With `runId`, the run's subject. */
+  as(actor: ActorRef): Store {
+    return new StoreView(this.#deps, stampActor(this.#deps.db, this.#caller, actor));
   }
 
   async #action<N extends EvName, T>(
@@ -653,25 +664,26 @@ export class StoreView implements Store {
     get: (id: string): Run | undefined => this.#getRun(id),
 
     // spec-gap: synchronous signature, so run.start is emitted post-write with no veto.
-    create: (r: { sessionId: string; triggerMessageId?: string; role: Role }): Run => {
+    create: (r: { sessionId: string; triggerMessageId?: string; role: Role; subject?: RunSubject }): Run => {
       const run: Run = {
         id: newId("run"),
         sessionId: r.sessionId,
         triggerMessageId: r.triggerMessageId ?? null,
         status: "queued",
-        role: r.role,
+        role: r.subject === undefined ? r.role : lowestRole([r.role, subjectRole(this.#deps.db, r.subject)]),
         provider: null,
         model: null,
         startedAt: null,
         endedAt: null,
         error: null,
         usage: {},
+        ...(r.subject === undefined ? {} : { subject: r.subject }),
       };
       this.#deps.db.transaction(() => {
         this.#deps.db
           .query(
-            `INSERT INTO runs (id, session_id, trigger_message_id, status, role, provider, model, usage, started_at, ended_at, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`,
+            `INSERT INTO runs (id, session_id, trigger_message_id, status, role, provider, model, usage, started_at, ended_at, error, subject)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)`,
           )
           .run(
             run.id,
@@ -684,10 +696,26 @@ export class StoreView implements Store {
             run.startedAt,
             run.endedAt,
             run.error,
+            r.subject === undefined ? null : JSON.stringify(r.subject),
           );
       })();
       this.#emitAfterWrite("run.start", { run });
       return run;
+    },
+
+    caller: (runId: string): Caller => {
+      const run = this.#getRun(runId);
+      if (!run) throw new Error(`unknown run "${runId}"`);
+      const subject = run.subject ?? null;
+      if (subject === null)
+        return this.#caller.actor
+          ? { ...this.#caller, actor: { ...this.#caller.actor, runId } }
+          : this.#caller;
+      if (subject.principalId === null) {
+        const { actor: _a, credentialId: _c, verifiedLogin: _v, ...rest } = this.#caller;
+        return rest;
+      }
+      return subjectCaller(this.#caller, this.#roleOf(subject.principalId) ?? "guest", runId, subject);
     },
 
     // spec-gap: synchronous signature; run.update (and run.end on a terminal status) is emitted post-write.
@@ -802,13 +830,24 @@ export class StoreView implements Store {
       })();
     },
 
-    link: async (principalId: string, platform: string, externalId: string): Promise<void> => {
+    link: async (
+      principalId: string,
+      platform: string,
+      externalId: string,
+      opts?: { code?: string },
+    ): Promise<void> => {
       const principal = this.principals.get(principalId);
       if (!principal) throw new Error(`unknown principal "${principalId}"`);
+      if (opts?.code !== undefined && !this.#takeChallenge(principalId, opts.code))
+        throw new ServiceDeniedError("invalid or expired link code");
+      const proof: LinkProof = {
+        kind: opts?.code === undefined ? "admin" : "challenge",
+        by: this.#caller.plugin,
+      };
       await this.#actionVoid(
         this.#caller,
         "principal.link",
-        { principal, identity: { platform, externalId } },
+        { principal, identity: { platform, externalId }, proof },
         ({ principal: p, identity }) =>
           this.#deps.db.transaction(() => {
             this.#deps.db
@@ -818,12 +857,54 @@ export class StoreView implements Store {
       );
     },
 
-    // spec-gap: no principal.update event exists in 7.3, so this writes directly.
     setRole: async (principalId: string, role: Role): Promise<void> => {
-      const res = this.#deps.db.query("UPDATE principals SET role = ? WHERE id = ?").run(role, principalId);
-      if (res.changes === 0) throw new Error(`unknown principal "${principalId}"`);
+      const principal = this.principals.get(principalId);
+      if (!principal) throw new Error(`unknown principal "${principalId}"`);
+      await this.#actionVoid(this.#caller, "principal.update", { principal, patch: { role } }, (final) =>
+        this.#deps.db.transaction(() => {
+          const owners = this.#deps.db
+            .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM principals WHERE role = 'owner'")
+            .get()?.n;
+          const current = this.#roleOf(final.principal.id);
+          if (current === "owner" && final.patch.role !== "owner" && owners === 1)
+            throw new LastOwnerError(final.principal.id);
+          this.#deps.db
+            .query("UPDATE principals SET role = ? WHERE id = ?")
+            .run(final.patch.role, final.principal.id);
+        })(),
+      );
+    },
+
+    identities: (principalId: string): { platform: string; externalId: string }[] =>
+      this.#deps.db
+        .query<{ platform: string; external_id: string }, string>(
+          "SELECT platform, external_id FROM identities WHERE principal_id = ? ORDER BY platform, external_id",
+        )
+        .all(principalId)
+        .map((r) => ({ platform: r.platform, externalId: r.external_id })),
+
+    linkChallenge: (principalId: string): string => {
+      if (!this.principals.get(principalId)) throw new Error(`unknown principal "${principalId}"`);
+      const code = randomCode();
+      this.#deps.db.query("DELETE FROM link_challenges WHERE expires_at < ?").run(Date.now());
+      this.#deps.db
+        .query("INSERT INTO link_challenges (code_hash, principal_id, expires_at) VALUES (?, ?, ?)")
+        .run(hashCode(code), principalId, Date.now() + LINK_TTL_MS);
+      return code;
     },
   };
+
+  #takeChallenge(principalId: string, code: string): boolean {
+    const hash = hashCode(code.trim().toUpperCase());
+    const row = this.#deps.db
+      .query<{ principal_id: string; expires_at: number }, string>(
+        "SELECT principal_id, expires_at FROM link_challenges WHERE code_hash = ?",
+      )
+      .get(hash);
+    if (row === null) return false;
+    this.#deps.db.query("DELETE FROM link_challenges WHERE code_hash = ?").run(hash);
+    return row.principal_id === principalId && row.expires_at >= Date.now();
+  }
 
   // ---- part types (9.4) ----------------------------------------------------
 

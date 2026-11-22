@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  type ActorRef,
+  type EmitOptions,
   type AfterEvent,
   type BeforeEvent,
   type Caller,
@@ -76,6 +78,17 @@ class CoreBusImpl implements CoreBus {
   readonly #onHookError: ((report: HookErrorReport) => void) | undefined;
   readonly #limits: Record<string, number>;
   readonly #slowMs: number;
+  #resolveActor: (caller: Caller, ref: ActorRef) => Caller = () => {
+    throw new Error("emit { as } needs the store");
+  };
+
+  setActorResolver(fn: (caller: Caller, ref: ActorRef) => Caller): void {
+    this.#resolveActor = fn;
+  }
+
+  resolveActor(caller: Caller, ref: ActorRef): Caller {
+    return this.#resolveActor(caller, ref);
+  }
   readonly #maxDepth: number;
   #nextId = 1;
 
@@ -427,9 +440,14 @@ class PluginBusView implements ScopedPluginEventBus {
     return this.#track(this.#bus.addHook(this.pluginId, "after", name, fn as HookFn, opts));
   }
 
-  async emit<N extends EvName>(name: N, payload: ValetEvents[N]): Promise<EmitResult<ValetEvents[N]>> {
+  async emit<N extends EvName>(
+    name: N,
+    payload: ValetEvents[N],
+    opts?: EmitOptions,
+  ): Promise<EmitResult<ValetEvents[N]>> {
     this.#assertEmitAllowed(name);
-    return this.#bus.emitAs({ plugin: this.pluginId }, name, payload);
+    const caller: Caller = { plugin: this.pluginId };
+    return this.#bus.emitAs(opts?.as ? this.#bus.resolveActor(caller, opts.as) : caller, name, payload);
   }
 
   onSignal<N extends SigName>(name: N, fn: (payload: ValetSignals[N], caller: Caller) => void): Subscription {

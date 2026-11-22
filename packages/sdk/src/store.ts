@@ -1,4 +1,5 @@
-import type { Denial } from "./events";
+import type { Audience } from "./acl";
+import type { Caller, Denial } from "./events";
 import type { ModelRef } from "./inference";
 import type { PartTypes } from "./parttypes";
 import type { ChannelBinding } from "./platform";
@@ -45,6 +46,16 @@ export interface Run {
   endedAt: number | null;
   error: string | null;
   usage: Record<string, number>;
+  /** The stored subject every check in the run is limited by; null for runs created without one. */
+  subject?: RunSubject | null;
+}
+export interface RunSubject {
+  principalId: string | null;
+  credentialId?: string;
+  tags?: string[];
+  cap?: string[];
+  audience?: Audience;
+  originRunId?: string;
 }
 export interface Message {
   id: string;
@@ -105,6 +116,12 @@ export type PartData =
 export type CancelledResult = { cancelled: true; cancelReason?: string; denied?: Denial };
 export interface ActorRef {
   principalId: string;
+  /** Stamps this run's subject; core rejects a run whose subject names another principal. */
+  runId?: string;
+}
+export interface LinkProof {
+  kind: "challenge" | "admin" | "offline";
+  by: string;
 }
 
 export interface Store {
@@ -163,7 +180,10 @@ export interface Store {
   };
   runs: {
     get(id: string): Run | undefined;
-    create(r: { sessionId: string; triggerMessageId?: string; role: Role }): Run;
+    /** With `subject`, the stored role is derived from it (the lowest of the principal, readers and tier). */
+    create(r: { sessionId: string; triggerMessageId?: string; role: Role; subject?: RunSubject }): Run;
+    /** The caller a tool call in this run carries: the plugin, and the run's subject on `actor`. */
+    caller(runId: string): Caller;
     update(
       id: string,
       patch: Partial<Pick<Run, "status" | "provider" | "model" | "error">> & {
@@ -175,8 +195,13 @@ export interface Store {
   principals: {
     get(id: string): Principal | undefined;
     resolveIdentity(platform: string, externalId: string, fallback?: { displayName: string }): Principal; // unknown -> new guest
-    link(principalId: string, platform: string, externalId: string): Promise<void>;
+    /** With `code`, a `linkChallenge` for that principal proves control of both sides. */
+    link(principalId: string, platform: string, externalId: string, opts?: { code?: string }): Promise<void>;
+    /** Emits `principal.update`; refuses to demote the last owner. */
     setRole(principalId: string, role: Role): Promise<void>;
+    identities(principalId: string): { platform: string; externalId: string }[];
+    /** A single-use code (10 minutes) a platform plugin passes back to `link`. */
+    linkChallenge(principalId: string): string;
   };
   /** Plugin-defined part types (9.4). */
   partTypes: PartTypes;

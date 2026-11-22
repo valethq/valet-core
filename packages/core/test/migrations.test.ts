@@ -28,7 +28,7 @@ describe("core migrations", () => {
   test("apply on an empty database and create the 8.2 schema", async () => {
     const db = openDatabase(":memory:");
     const applied = await runCoreMigrations(db);
-    expect(applied).toEqual(["001_core"]);
+    expect(applied).toEqual(["001_core", "002_acl"]);
     for (const table of CORE_TABLES) expect(tableNames(db)).toContain(table);
     const indexes = db
       .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_session'")

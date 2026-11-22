@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { PluginContext, PluginManifest } from "@valethq/sdk";
+import type { AclHost, ControlPlane, PluginContext, PluginManifest } from "@valethq/sdk";
 import type { CoreBus } from "./bus/types";
 import type { HttpRegistry, WsRegistry } from "./hosts";
 import type { CoreLogger } from "./log";
@@ -32,6 +32,8 @@ export interface CtxDeps {
   http: HttpRegistry;
   ws: WsRegistry;
   log: CoreLogger;
+  acl: AclHost;
+  control: ControlPlane;
 }
 
 /** 5.3: builds the id-bound PluginContext for one plugin. */
@@ -83,6 +85,8 @@ export function buildPluginContext(
     storage: deps.store.pluginStorage(plugin.id),
     http,
     ws,
+    control: deps.control,
+    acl: deps.acl,
     secrets: createSecrets(deps.valetHome, log),
     paths: { data, cache, valetHome: deps.valetHome },
     signal: abort.signal,

@@ -250,7 +250,7 @@ describe("optional dependents of a cycle", () => {
 
 describe("manifest validation", () => {
   test("garbage semver ranges are rejected and real ranges are accepted", () => {
-    const accepted = ["*", "x", "^0.1.0", ">=0.0.1", ">=0.1.0 <1.0.0", "~0.1.0", "0.1.0"];
+    const accepted = ["*", "x", "^0.1.0", ">=0.0.1", ">=0.1.0 <1.0.0", "~0.1.0", "0.1.1"];
     for (const range of accepted) expect(validateManifest(base({ valet: range })), range).toEqual([]);
 
     const dependencyRanges = [
@@ -309,7 +309,7 @@ describe("manifest validation", () => {
 
 describe("registrations after dispose", () => {
   test("http, ws and scope views drop registrations made after disposeAll", () => {
-    const http = createHttpRegistry({ host: "127.0.0.1", port: 0 });
+    const http = createHttpRegistry(() => "http://127.0.0.1:0");
     const routes = http.forPlugin("valet-test");
     routes.route("GET", "/kept", () => new Response("ok"));
     routes.disposeAll();

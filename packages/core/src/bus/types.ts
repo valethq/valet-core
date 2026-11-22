@@ -1,4 +1,5 @@
 import type {
+  ActorRef,
   Caller,
   EmitResult,
   HookPhase,
@@ -76,6 +77,8 @@ export interface CoreBus {
   /** The PluginEventBus for one plugin, bound to its id and its event namespace (default: id minus "valet-"). */
   forPlugin(pluginId: string, namespace?: string): ScopedPluginEventBus;
   listenerCount(name: string, phase?: HookPhase): number;
+  /** Installed by the store: how `emit(…, { as })` stamps `caller.actor`. */
+  setActorResolver(fn: (caller: Caller, ref: ActorRef) => Caller): void;
 }
 
 export interface ScopedPluginEventBus extends PluginEventBus {

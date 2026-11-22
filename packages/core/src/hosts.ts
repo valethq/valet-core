@@ -1,5 +1,13 @@
-import type { Disposable, HttpHost, RouteHandler, WsHost } from "@valethq/sdk";
-import type { RequestContext } from "@valethq/sdk";
+import type {
+  CallAcl,
+  Disposable,
+  HttpHost,
+  RequestContext,
+  RouteAcl,
+  RouteHandler,
+  TopicAcl,
+  WsHost,
+} from "@valethq/sdk";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -10,12 +18,21 @@ export interface RouteRecord {
   readonly path: string;
   readonly handler: RouteHandler;
   readonly public: boolean;
+  readonly acl: RouteAcl;
 }
 
 export interface WsHandlerRecord {
   readonly plugin: string;
   readonly method: string;
   readonly fn: (params: unknown, ctx: RequestContext) => unknown | Promise<unknown>;
+  readonly acl: CallAcl;
+}
+
+export interface TopicRecord {
+  readonly plugin: string;
+  readonly namespace: string;
+  readonly prefix: string;
+  readonly acl: TopicAcl;
 }
 
 export interface ScopedHttpHost extends HttpHost {
@@ -37,6 +54,8 @@ export interface WsRegistry {
   forPlugin(pluginId: string, namespace: string): ScopedWsHost;
   /** The handler table the /ws endpoint routes "call" frames to (10.3). */
   handlers(): ReadonlyMap<string, WsHandlerRecord>;
+  /** Topic prefixes plugins declared with `ctx.ws.topic`. */
+  topics(): readonly TopicRecord[];
   /** Installed by the control-plane server so publish() reaches live sockets. */
   setBroadcast(fn: ((topic: string, name: string, data: unknown) => void) | undefined): void;
   removePlugin(pluginId: string): void;
@@ -48,10 +67,9 @@ function normalizePath(path: string): string {
   return p;
 }
 
-/** Thin route table for M0: registration and disposal only; the phase-4 server reads it. */
-export function createHttpRegistry(server: { host: string; port: number }): HttpRegistry {
+/** Route table: registration and disposal; the control plane reads it. `baseUrl` comes from the transport. */
+export function createHttpRegistry(baseUrl: () => string): HttpRegistry {
   const routes: RouteRecord[] = [];
-  const base = `http://${server.host}:${server.port}`;
 
   return {
     routes: () => routes,
@@ -67,6 +85,7 @@ export function createHttpRegistry(server: { host: string; port: number }): Http
             path: normalizePath(path),
             handler,
             public: opts?.public ?? false,
+            acl: opts ?? {},
           };
           if (routes.some((r) => r.plugin === pluginId && r.method === method && r.path === record.path)) {
             throw new Error(`route ${method} ${record.path} already registered by "${pluginId}"`);
@@ -81,7 +100,7 @@ export function createHttpRegistry(server: { host: string; port: number }): Http
           tracked.add(disposable);
           return disposable;
         },
-        url: (path) => `${base}/plugins/${pluginId}${normalizePath(path)}`,
+        url: (path) => `${baseUrl()}/plugins/${pluginId}${normalizePath(path)}`,
         disposeAll: () => {
           closed = true;
           for (const d of tracked) d.dispose();
@@ -101,10 +120,12 @@ export function createHttpRegistry(server: { host: string; port: number }): Http
 /** Thin WS registry for M0: stores "call" handlers; publish() waits for the phase-4 server. */
 export function createWsRegistry(): WsRegistry {
   const handlers = new Map<string, WsHandlerRecord>();
+  const topics: TopicRecord[] = [];
   let broadcast: ((topic: string, name: string, data: unknown) => void) | undefined;
 
   return {
     handlers: () => handlers,
+    topics: () => topics,
     setBroadcast: (fn) => {
       broadcast = fn;
     },
@@ -112,7 +133,7 @@ export function createWsRegistry(): WsRegistry {
       const tracked = new Set<Disposable>();
       let closed = false;
       const host: ScopedWsHost = {
-        handle(method, fn) {
+        handle(method, fn, opts) {
           if (closed) return { dispose() {} };
           if (!method.startsWith(`${namespace}.`)) {
             throw new Error(
@@ -122,11 +143,26 @@ export function createWsRegistry(): WsRegistry {
           if (handlers.has(method)) {
             throw new Error(`ws method "${method}" already handled by "${handlers.get(method)?.plugin}"`);
           }
-          const record: WsHandlerRecord = { plugin: pluginId, method, fn };
+          const record: WsHandlerRecord = { plugin: pluginId, method, fn, acl: opts ?? {} };
           handlers.set(method, record);
           const disposable: Disposable = {
             dispose: () => {
               if (handlers.get(method) === record) handlers.delete(method);
+            },
+          };
+          tracked.add(disposable);
+          return disposable;
+        },
+        topic(prefix, acl) {
+          if (closed) return { dispose() {} };
+          if (!prefix.startsWith(`${namespace}:`))
+            throw new Error(`plugin "${pluginId}" cannot declare topic "${prefix}" outside "${namespace}:"`);
+          const record: TopicRecord = { plugin: pluginId, namespace, prefix, acl };
+          topics.push(record);
+          const disposable: Disposable = {
+            dispose: () => {
+              const i = topics.indexOf(record);
+              if (i >= 0) topics.splice(i, 1);
             },
           };
           tracked.add(disposable);
@@ -152,6 +188,7 @@ export function createWsRegistry(): WsRegistry {
       for (const [method, record] of handlers) {
         if (record.plugin === pluginId) handlers.delete(method);
       }
+      for (let i = topics.length - 1; i >= 0; i--) if (topics[i]?.plugin === pluginId) topics.splice(i, 1);
     },
   };
 }

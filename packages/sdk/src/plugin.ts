@@ -1,3 +1,5 @@
+import type { AclHost } from "./acl";
+import type { ControlPlane } from "./control";
 import type { PluginEventBus } from "./events";
 import type { HttpHost } from "./http";
 import type { PluginManifest } from "./manifest";
@@ -42,6 +44,10 @@ export interface PluginContext<Config = unknown> {
   readonly storage: PluginStorage;
   readonly http: HttpHost;
   readonly ws: WsHost;
+  /** Transport entry: core identifies, authorizes and serves; the caller decides nothing. */
+  readonly control: ControlPlane;
+  /** Declared permissions and credential state, for `can`. */
+  readonly acl: AclHost;
   readonly secrets: Secrets;
   readonly paths: { readonly data: string; readonly cache: string; readonly valetHome: string };
   /** Aborted when this plugin deactivates or core shuts down. */

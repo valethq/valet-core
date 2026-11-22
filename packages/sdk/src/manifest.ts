@@ -1,3 +1,4 @@
+import type { AclDoc } from "./acl";
 import type { SettingsDoc } from "./settings";
 
 export interface PluginManifest {
@@ -31,6 +32,8 @@ export interface PluginManifest {
   settings?: SettingsDoc;
   /** JSON Schema for this plugin's config block when it has no `settings` document; ignored when `settings` is present. */
   configSchema?: Record<string, unknown>;
+  /** Permissions this plugin declares and enforces, named `<namespace>:<key>`. */
+  acl?: AclDoc;
   /** Reserved for post-v1 permissions. Ignored in v1 (plugins are fully trusted). */
   permissions?: string[];
 }

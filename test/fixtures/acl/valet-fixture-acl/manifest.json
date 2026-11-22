@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "valet-fixture-acl",
+  "name": "Fixture ACL",
+  "version": "0.1.0",
+  "valet": "^0.1.1",
+  "main": "./index.ts",
+  "events": { "namespace": "fxacl" },
+  "acl": {
+    "permissions": {
+      "open": { "summary": "Anyone identified", "default": "guest" },
+      "item.read": { "summary": "Read one item", "default": "owner", "resource": "item" },
+      "feed": { "summary": "Subscribe to feeds", "default": "guest" }
+    }
+  }
+}
