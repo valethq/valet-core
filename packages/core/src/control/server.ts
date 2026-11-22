@@ -101,7 +101,7 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
 
     const res = await kernel.control.dispatch(req);
     // 10.1: a plugin route answering text/html is a 500 plus a log line.
-    if (res.headers.get("content-type")?.includes("text/html")) {
+    if (res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "text/html") {
       log.error("route returned text/html", { path });
       return finalize(errorJson(500, "html_not_allowed", "control plane does not serve HTML"), origin);
     }
