@@ -100,6 +100,11 @@ function result<T>(value: T | CancelledResult, status = 200): Response {
   return json(value, status);
 }
 
+const projectConflict = (taken: { id: string; name: string }, allowed: boolean): Response =>
+  allowed
+    ? errorJson(409, "conflict", `already registered as "${taken.name}"`, { projectId: taken.id })
+    : errorJson(409, "conflict", "workspaceDir is already registered");
+
 type RestHandler = (req: Request, ctx: RequestContext, store: Store) => Promise<Response>;
 
 /** The permission a core route checks in `dispatch`; `collection` routes filter each item instead. */
@@ -107,6 +112,8 @@ export interface RestAcl {
   permission: string;
   resource?: (params: Record<string, string>, store: Store) => ResourceScope | undefined;
   collection?: boolean;
+  /** The handler checks the permission itself once it knows the resource (for example POST /sessions). */
+  manual?: boolean;
 }
 
 interface RestRoute {
@@ -195,7 +202,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
           .filter((p) => deps.can(ctx.caller, "core:project.read", { id: `project:${p.id}` })),
       ),
     ),
-    r("POST", "/projects", P("core:project.write"), async (req, _ctx, store) => {
+    r("POST", "/projects", P("core:project.write"), async (req, ctx, store) => {
       const b = await body(req);
       if (typeof b.workspaceDir !== "string" || (b.name !== undefined && typeof b.name !== "string")) {
         return errorJson(400, "bad_request", "workspaceDir is required; name must be a string");
@@ -203,7 +210,10 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       const workspaceDir = await normalizeDir(b.workspaceDir);
       const taken = store.projects.list().find((p) => p.workspaceDir === workspaceDir);
       if (taken)
-        return errorJson(409, "conflict", `already registered as "${taken.name}"`, { projectId: taken.id });
+        return projectConflict(
+          taken,
+          deps.can(ctx.caller, "core:project.read", { id: `project:${taken.id}` }),
+        );
       const name = (b.name as string | undefined)?.trim() || basename(workspaceDir);
       return result(
         await store.projects.create({
@@ -227,7 +237,10 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         const dir = await normalizeDir(String(b.workspaceDir));
         const taken = store.projects.list().find((p) => p.workspaceDir === dir && p.id !== ctx.params.id);
         if (taken)
-          return errorJson(409, "conflict", `already registered as "${taken.name}"`, { projectId: taken.id });
+          return projectConflict(
+            taken,
+            deps.can(ctx.caller, "core:project.read", { id: `project:${taken.id}` }),
+          );
         patch.workspaceDir = dir;
       }
       if (b.settings !== undefined) patch.settings = b.settings as Record<string, unknown>;
@@ -267,10 +280,16 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
           .filter((sess) => deps.can(ctx.caller, "core:session.read", sessionScope(sess.id, sess.projectId))),
       );
     }),
-    r("POST", "/sessions", P("core:session.write"), async (req, _ctx, store) => {
+    r("POST", "/sessions", { permission: "core:session.write", manual: true }, async (req, ctx, store) => {
       const b = await body(req);
       if (typeof b.projectId !== "string") return errorJson(400, "bad_request", "projectId is required");
-      if (!store.projects.get(b.projectId)) return errorJson(404, "not_found", "unknown project");
+      const project = store.projects.get(b.projectId);
+      if (!project) return errorJson(404, "not_found", "unknown project");
+      const allowed = deps.can(ctx.caller, "core:session.write", {
+        id: "session:new",
+        ancestors: [`project:${b.projectId}`],
+      });
+      if (!allowed) return deniedJson({ by: "core", reason: "core:session.write denied for this project" });
       return result(
         await store.sessions.create({
           projectId: b.projectId,
@@ -314,7 +333,8 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       );
     }),
     r("POST", "/sessions/:id/messages", P("core:message.write", session), async (req, ctx, store) => {
-      if (!store.sessions.get(ctx.params.id as string)) return errorJson(404, "not_found", "unknown session");
+      const sessionRow = store.sessions.get(ctx.params.id as string);
+      if (!sessionRow) return errorJson(404, "not_found", "unknown session");
       const b = await body(req);
       if (typeof b.role !== "string" || !Array.isArray(b.parts)) {
         return errorJson(400, "bad_request", "role and parts are required");
@@ -326,7 +346,19 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (clientId !== undefined) {
         const recent = store.messages.list(ctx.params.id as string, { limit: 50 });
         const dup = recent.find((m) => m.message.meta.clientMessageId === clientId);
-        if (dup) return json(dup);
+        if (dup) {
+          const readable = deps.can(
+            ctx.caller,
+            "core:session.read",
+            sessionScope(ctx.params.id as string, sessionRow.projectId),
+          );
+          if (!readable)
+            return deniedJson({
+              by: "core",
+              reason: "reading an existing message requires core:session.read",
+            });
+          return json(dup);
+        }
       }
       return result(
         await store.messages.create({

@@ -838,6 +838,10 @@ export class StoreView implements Store {
     ): Promise<void> => {
       const principal = this.principals.get(principalId);
       if (!principal) throw new Error(`unknown principal "${principalId}"`);
+      const linked = this.#deps.db
+        .query("SELECT principal_id FROM identities WHERE platform = ? AND external_id = ?")
+        .get(platform, externalId) as { principal_id: string } | null;
+      if (linked !== null) throw new ServiceDeniedError("identity is already linked");
       if (opts?.code !== undefined && !this.#takeChallenge(principalId, opts.code))
         throw new ServiceDeniedError("invalid or expired link code");
       const proof: LinkProof = {

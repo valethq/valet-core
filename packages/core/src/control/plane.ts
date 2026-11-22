@@ -60,6 +60,7 @@ export function createControlPlane(
   opts: PlaneOptions = {},
 ): CorePlane {
   const log = kernel.log.forPlugin("control");
+  let closed = false;
   const coreScopes = kernel.scopes.forPlugin("core", []);
   const coreStore = kernel.store.forPlugin("core");
   const aclCtx: AclContext = {
@@ -161,7 +162,7 @@ export function createControlPlane(
   function routeCheck(resolved: Resolved, req: Request, caller: Caller): Decision | undefined {
     if (resolved.kind === "rest") {
       const m = resolved.match;
-      if (m === undefined || m.acl.collection) return undefined;
+      if (m === undefined || m.acl.collection || m.acl.manual) return undefined;
       return check(
         caller,
         m.acl.permission,
@@ -194,6 +195,7 @@ export function createControlPlane(
   }
 
   async function dispatch(req: Request): Promise<Response> {
+    if (closed) return errorJson(503, "shutting_down", "valet is shutting down");
     const url = new URL(req.url);
     const path = url.pathname;
     const resolved = resolve(req.method, path);
@@ -320,6 +322,7 @@ export function createControlPlane(
   });
 
   async function connect(req: Request): Promise<ControlChannel> {
+    if (closed) throw new ControlRefusedError(errorJson(503, "shutting_down", "valet is shutting down"));
     const url = new URL(req.url);
     const identified = await identify(req);
     if (!identified.ok) throw new ControlRefusedError(identified.res);
@@ -413,6 +416,7 @@ export function createControlPlane(
     publish: hub.publish,
     revalidate: () => hub.revalidate(),
     close() {
+      closed = true;
       clearInterval(interval);
       clearTimeout(timer);
       kernel.ws.setBroadcast(undefined);

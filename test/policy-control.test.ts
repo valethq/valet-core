@@ -16,6 +16,7 @@ async function up(policy: unknown) {
     JSON.stringify({
       pluginPaths: [join(ROOT, "plugins"), join(import.meta.dir, "fixtures", "auth")],
       plugins: {
+        "valet-http": { enabled: false },
         "valet-fixture-auth": {
           config: { token: "tok", externalId: "friend", displayName: "Friend", role: "guest" },
         },

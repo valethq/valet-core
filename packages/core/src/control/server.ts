@@ -101,7 +101,7 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
 
     const res = await kernel.control.dispatch(req);
     // 10.1: a plugin route answering text/html is a 500 plus a log line.
-    if (res.headers.get("content-type")?.includes("text/html")) {
+    if (path.startsWith("/plugins/") && res.headers.get("content-type")?.includes("text/html")) {
       log.error("route returned text/html", { path });
       return finalize(errorJson(500, "html_not_allowed", "control plane does not serve HTML"), origin);
     }
@@ -115,7 +115,11 @@ export function createControlServer(kernel: ValetKernel, opts: ControlServerOpti
       server = Bun.serve<SocketData>({
         hostname: host,
         port,
-        fetch: (req, srv) => onRequest(req, srv),
+        fetch: (req, srv) =>
+          onRequest(req, srv).catch((err: unknown) => {
+            log.error("request failed", { error: String(err) });
+            return finalize(errorJson(500, "internal", "internal error"), req.headers.get("origin"));
+          }),
         websocket: {
           open(ws) {
             ws.data.channel.onFrame((frame) => sendFrame(ws, frame));
