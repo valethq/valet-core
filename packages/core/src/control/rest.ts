@@ -289,8 +289,10 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       });
       if (!allowed) return deniedJson({ by: "core", reason: "core:session.write denied for this project" });
       if (!store.projects.get(b.projectId)) return errorJson(404, "not_found", "unknown project");
-      if (typeof b.parentSessionId === "string") {
-        const parentId = String(b.parentSessionId);
+      if (b.parentSessionId !== undefined) {
+        if (typeof b.parentSessionId !== "string")
+          return errorJson(400, "bad_request", "parentSessionId must be a string");
+        const parentId = b.parentSessionId;
         const parent = store.sessions.get(parentId);
         const parentAllowed = deps.can(
           ctx.caller,
@@ -521,7 +523,7 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (!meta) return errorJson(404, "not_found", "unknown blob");
       const path = deps.blobPath(ctx.params.id as string);
       const mime = meta.mime ?? "application/octet-stream";
-      const html = mime.toLowerCase().includes("text/html");
+      const html = mime.split(";")[0]?.trim().toLowerCase() === "text/html";
       return new Response(Bun.file(path), {
         headers: {
           "content-type": html ? "application/octet-stream" : mime,
