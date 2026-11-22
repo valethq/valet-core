@@ -247,4 +247,6 @@ export const CORE_SCOPE_DEFS: ScopeDefinition[] = [
   { name: "platform", version: 1, cardinality: "many" },
   // spec-gap: cardinality for identity is unstated; 10.2 asks providers in load order, so "many".
   { name: "identity", version: 1, cardinality: "many" },
+  { name: "policy", version: 1, cardinality: "one" },
+  { name: "transport", version: 1, cardinality: "many" },
 ];

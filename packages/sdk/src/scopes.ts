@@ -4,8 +4,10 @@ import type { IdentityProvider } from "./identity";
 import type { InferenceProvider } from "./inference";
 import type { MessagePlatform } from "./platform";
 import type { Disposable } from "./plugin";
+import type { PolicyProvider } from "./policy";
 import type { SettingsContribution } from "./settings";
 import type { ToolProvider } from "./tools";
+import type { Transport } from "./transport";
 
 export interface ValetScopes {
   inference: InferenceProvider;
@@ -14,6 +16,8 @@ export interface ValetScopes {
   identity: IdentityProvider;
   context: ContextManager; // defined and provided by valet-contextmanager
   settings: SettingsContribution; // settings@2, defined by valet-ui
+  policy: PolicyProvider; // cardinality one, provided by valet-policy
+  transport: Transport;
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 

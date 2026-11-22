@@ -151,5 +151,30 @@ export function validateManifest(manifest: unknown): string[] {
   ) {
     errors.push("permissions must be a string array");
   }
+  if (m.acl !== undefined) checkAcl(m.acl, errors);
   return errors;
+}
+
+const ROLES = new Set(["owner", "trusted", "guest"]);
+
+function checkAcl(acl: unknown, errors: string[]): void {
+  if (!isRecord(acl) || !isRecord(acl.permissions)) {
+    errors.push("acl.permissions must be an object");
+    return;
+  }
+  for (const [name, def] of Object.entries(acl.permissions)) {
+    const at = `acl.permissions.${name}`;
+    if (!/^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$/.test(name))
+      errors.push(`${at}: name must be dotted lowercase`);
+    if (!isRecord(def) || typeof def.summary !== "string") {
+      errors.push(`${at}.summary must be a string`);
+      continue;
+    }
+    if (def.default !== undefined && !ROLES.has(def.default as string))
+      errors.push(`${at}.default must be owner, trusted or guest`);
+    if (def.resource !== undefined && typeof def.resource !== "string")
+      errors.push(`${at}.resource must be a string`);
+    if (def.requireVerifiedLogin !== undefined && typeof def.requireVerifiedLogin !== "boolean")
+      errors.push(`${at}.requireVerifiedLogin must be a boolean`);
+  }
 }

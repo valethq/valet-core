@@ -33,12 +33,13 @@ async function up(opts: {
       plugins: opts.plugins ?? {},
     }),
   );
-  const kernel = await boot({ valetHome: home, dbPath: ":memory:", out: () => {} });
-  const control = createControlServer(kernel, {
-    host: "127.0.0.1",
-    port: 0,
+  const kernel = await boot({
+    valetHome: home,
+    dbPath: ":memory:",
+    out: () => {},
     ...(opts.ringSize === undefined ? {} : { ringSize: opts.ringSize }),
   });
+  const control = createControlServer(kernel, { host: "127.0.0.1", port: 0 });
   control.start();
   const env = { kernel, control, base: control.baseUrl(), home };
   running.push(env);

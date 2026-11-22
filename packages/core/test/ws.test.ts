@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { ServerWebSocket } from "bun";
 import type { Logger } from "@valethq/sdk";
 import { createCoreBus } from "../src/bus";
-import { WsHub, type WsSocketData } from "../src/control/ws";
+import { type HubSocket, WsHub } from "../src/control/ws";
 import { createWsRegistry } from "../src/hosts";
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 function fakeWs(sendResult: number): {
-  ws: ServerWebSocket<WsSocketData>;
+  ws: HubSocket;
   closes: { code: number; reason: string }[];
 } {
   const closes: { code: number; reason: string }[] = [];
@@ -22,7 +21,7 @@ function fakeWs(sendResult: number): {
     },
     send: () => sendResult,
     close: (code: number, reason?: string) => closes.push({ code, reason: reason ?? "" }),
-  } as unknown as ServerWebSocket<WsSocketData>;
+  } as HubSocket;
   return { ws, closes };
 }
 
@@ -30,9 +29,10 @@ function makeHub(): WsHub {
   return new WsHub({
     bus: createCoreBus({ logger, onHookError: () => {} }),
     ws: createWsRegistry(),
-    plugins: () => [],
     logger,
-    identify: async () => undefined,
+    reidentify: async () => ({ ok: false }),
+    authorize: () => ({ allow: true }),
+    ownerOf: () => undefined,
   });
 }
 

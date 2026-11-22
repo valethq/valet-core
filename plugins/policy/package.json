@@ -1,0 +1,8 @@
+{
+  "name": "valet-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "policy@1 provider reading <valetHome>/policy.json.",
+  "license": "AGPL-3.0-only"
+}

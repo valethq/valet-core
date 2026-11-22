@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { Logger, PluginStorage } from "@valethq/sdk";
 import type { CoreBus } from "../bus/types";
+import { stampActor } from "./actor";
 import { defaultDbPath, openDatabase } from "./engine";
 import { runCoreMigrations } from "./migrate";
 import { createPluginStorage } from "./storage";
@@ -45,6 +46,7 @@ export async function openStore(opts: OpenStoreOptions): Promise<OpenedStore> {
     ),
     origins: new Map(),
   };
+  opts.bus.setActorResolver((caller, ref) => stampActor(db, caller, ref));
   return {
     ...createStore(deps),
     pluginStorage: (pluginId) => createPluginStorage(db, pluginId),

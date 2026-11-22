@@ -1,5 +1,5 @@
 import type { HookPhase } from "./events";
-import type { Message, Part, Principal, Project, Run, Session } from "./store";
+import type { LinkProof, Message, Part, Principal, Project, Run, Session } from "./store";
 import type { Role } from "./tools";
 
 // Section 7.3: the core event catalog, declaration-merged into the open maps.
@@ -23,7 +23,12 @@ declare module "./events" {
     "run.cancel": { runId: string; by: string };
     "run.interrupted": { run: Run };
     "tool.call": { runId: string; callId: string; name: string; input: unknown; role: Role };
-    "principal.link": { principal: Principal; identity: { platform: string; externalId: string } };
+    "principal.link": {
+      principal: Principal;
+      identity: { platform: string; externalId: string };
+      proof: LinkProof;
+    };
+    "principal.update": { principal: Principal; patch: { role: Role } };
     "control.request": {
       kind: "http" | "ws.sub" | "ws.call";
       method: string;
@@ -32,6 +37,9 @@ declare module "./events" {
       plugin?: string;
     };
     "identity.changed": { principalId?: string };
+    /** valet-policy loaded a policy (or fell back); core revalidates channels. */
+    "policy.changed": { mode: "policy" | "last-good" | "defaults"; reason?: string };
+    "policy.rejected": { reason: string };
     "core.ready": Record<string, never>;
     "core.shutdown": Record<string, never>;
   }

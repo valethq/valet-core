@@ -33,12 +33,13 @@ async function up(opts: { ringSize?: number } = {}): Promise<Env> {
       },
     }),
   );
-  const kernel = await boot({ valetHome: home, dbPath: ":memory:", out: () => {} });
-  const control = createControlServer(kernel, {
-    host: "127.0.0.1",
-    port: 0,
+  const kernel = await boot({
+    valetHome: home,
+    dbPath: ":memory:",
+    out: () => {},
     ...(opts.ringSize === undefined ? {} : { ringSize: opts.ringSize }),
   });
+  const control = createControlServer(kernel, { host: "127.0.0.1", port: 0 });
   control.start();
   const env = { kernel, control, base: control.baseUrl(), home };
   running.push(env);
@@ -193,6 +194,8 @@ describe("ws hub fixes", () => {
     const store = env.kernel.store.forCaller({ plugin: "core" });
     const principal = store.principals.resolveIdentity("fixture", "owner");
     expect(principal.role).toBe("owner");
+    const other = store.principals.resolveIdentity("fixture", "second-owner");
+    await store.principals.setRole(other.id, "owner");
     await store.principals.setRole(principal.id, "guest");
     expect(store.principals.get(principal.id)?.role).toBe("guest");
     await env.kernel.bus.emitAs({ plugin: "identity" }, "identity.changed", {});
@@ -205,7 +208,8 @@ describe("ws hub fixes", () => {
       send(ws, { type: "call", id: "c2", method: "nope.role" });
       const result = await waitFrame(c, from, (f) => f.type === "result" && f.id === "c2");
       if (result.type !== "result" || result.ok) throw new Error("expected unknown_method");
-      if (roles.at(-2) === "ws.sub:guest" && roles.at(-1) === "ws.call:guest") {
+      // core now denies the owner-only topic itself, so only the call reaches control.request
+      if (roles.at(-1) === "ws.call:guest") {
         demoted = true;
         break;
       }

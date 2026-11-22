@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "valet-policy",
+  "name": "Policy",
+  "version": "0.1.0",
+  "description": "policy@1 from <valetHome>/policy.json: groups, tags and grants, with tests that run on every load.",
+  "valet": "^0.1.1",
+  "main": "./src/index.ts",
+  "provides": ["policy@1"],
+  "events": {
+    "namespace": "policy"
+  },
+  "acl": {
+    "permissions": {
+      "tag.assign": {
+        "summary": "Mint credentials with a tag",
+        "resource": "tag",
+        "requireVerifiedLogin": true
+      }
+    }
+  }
+}

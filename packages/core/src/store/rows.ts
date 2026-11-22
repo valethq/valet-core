@@ -1,4 +1,4 @@
-import type { Message, Part, Principal, Project, Run, Session } from "@valethq/sdk";
+import type { Message, Part, Principal, Project, Run, RunSubject, Session } from "@valethq/sdk";
 
 type Row = Record<string, unknown>;
 
@@ -46,6 +46,7 @@ export function rowToRun(r: Row): Run {
     endedAt: (r.ended_at as number | null) ?? null,
     error: (r.error as string | null) ?? null,
     usage: json(r.usage) as Record<string, number>,
+    ...(typeof r.subject === "string" ? { subject: JSON.parse(r.subject) as RunSubject } : {}),
   };
 }
 

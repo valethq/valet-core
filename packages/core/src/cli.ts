@@ -21,13 +21,15 @@ async function start(args: string[]): Promise<number> {
   try {
     const kernel = await boot({ valetHome });
     // 5.2 step 6: the control plane starts only after core.ready, and stops first on shutdown.
+    // spec-gap: the built-in listener serves only when no transport@1 plugin (valet-http) is active.
     const control = createControlServer(kernel);
-    control.start();
+    const builtIn = kernel.scopes.providers("transport").length === 0;
+    if (builtIn) control.start();
     const active = kernel.plugins().filter((p) => p.state === "active").length;
     const failed = kernel.plugins().filter((p) => p.state === "failed").length;
     kernel.log.info(`valet ${CORE_API_VERSION} ready: ${active} plugins active, ${failed} failed`, {
       valetHome,
-      controlPlane: control.baseUrl(),
+      controlPlane: builtIn ? control.baseUrl() : "transport@1",
       plugins: kernel.plugins(),
     });
     await new Promise<void>((resolve) => {

@@ -1,7 +1,7 @@
-import type { ServerWebSocket } from "bun";
 import {
   type Caller,
   type ClientFrame,
+  type Decision,
   type Logger,
   type Principal,
   type RequestContext,
@@ -10,72 +10,77 @@ import {
 } from "@valethq/sdk";
 import type { CoreBus } from "../bus/types";
 import type { WsRegistry } from "../hosts";
-import type { PluginStatus } from "../kernel";
 
-/** Per-socket state stamped at upgrade (10.2/10.3). */
+/** Per-connection state stamped at connect (10.2/10.3). */
 export interface WsSocketData {
   caller: Caller;
   principal: Principal | undefined;
   url: URL;
   subs: Set<string>;
-  /** Upgrade request headers (cookie, authorization, ...) so identity providers can re-identify the socket. */
+  /** Connect request headers (cookie, authorization, ...) so identity providers can re-identify the channel. */
   headers: [string, string][];
   closed?: boolean;
   /** Inbound frames run one at a time so a later unsub cannot lose to an in-flight sub. */
   chain?: Promise<void>;
 }
 
-const send = (ws: ServerWebSocket<WsSocketData>, frame: ServerFrame): void => {
+/** One connection as the hub sees it; `send` returns 0 when the transport dropped the frame. */
+export interface HubSocket {
+  data: WsSocketData;
+  send(frame: ServerFrame): number;
+  close(code: number, reason: string): void;
+}
+
+const send = (ws: HubSocket, frame: ServerFrame): void => {
   try {
     // send() === 0 means the frame was dropped; close so the client resumes via `since` instead of missing it.
-    if (ws.send(JSON.stringify(frame)) === 0) ws.close(1011, "send dropped");
+    if (ws.send(frame) === 0) ws.close(1011, "send dropped");
   } catch {
     // socket closing; subscriptions are removed on close
   }
 };
 
+/** What re-identification found for a channel. */
+export type Reidentified = { ok: true; caller: Caller; principal: Principal } | { ok: false };
+
 export interface WsHubDeps {
   bus: CoreBus;
   ws: WsRegistry;
-  plugins(): PluginStatus[];
   logger: Logger;
-  /** Re-runs the upgrade-time identification; undefined means anonymous or refused. */
-  identify(req: Request): Promise<Principal | undefined>;
+  /** Re-runs connect-time identification and credential checks with the stored headers. */
+  reidentify(data: WsSocketData): Promise<Reidentified>;
+  /** The permission check for a sub (topic) or call (method) frame. */
+  authorize(caller: Caller, kind: "ws.sub" | "ws.call", target: string, frame: ClientFrame): Decision;
+  /** The plugin owning a topic or method, for `control.request`. */
+  ownerOf(kind: "ws.sub" | "ws.call", target: string): string | undefined;
   /** Ring buffer per topic (10.3: 2,000 frames). */
   ringSize?: number;
 }
 
 const DEFAULT_RING = 2000;
 
+const deniedFrame = (id: string, d: { by?: string; reason: string }): ServerFrame => ({
+  type: "result",
+  id,
+  ok: false,
+  error: { code: "denied", message: `${d.by ?? "?"}: ${d.reason}` },
+});
+
 /**
- * The /ws multiplexed protocol (10.3): sub/unsub/call/ping, per-topic seq with a
- * ring buffer, `since` replay and `gap`, and control.request admission on
- * sub and call frames. Call handlers come from the kernel's WsRegistry.
+ * The multiplexed protocol (10.3): sub/unsub/call/ping, per-topic seq with a ring buffer, `since` replay and
+ * `gap`, the permission check and `control.request` admission on sub and call frames. Transport-agnostic: a
+ * transport feeds parsed frames in and delivers frames out through a HubSocket.
  */
 export class WsHub {
   readonly #deps: WsHubDeps;
   readonly #ringSize: number;
-  readonly #sockets = new Set<ServerWebSocket<WsSocketData>>();
+  readonly #sockets = new Set<HubSocket>();
   readonly #seq = new Map<string, number>();
   readonly #buffers = new Map<string, { seq: number; name: string; data: unknown }[]>();
 
   constructor(deps: WsHubDeps) {
     this.#deps = deps;
     this.#ringSize = deps.ringSize ?? DEFAULT_RING;
-  }
-
-  /**
-   * spec-gap: the plugin owning a "<ns>:<rest>" topic is inferred from registered
-   * "<ns>.*" call handlers, then from a plugin whose default namespace matches.
-   */
-  ownerOf(prefixed: string): string | undefined {
-    const sep = prefixed.search(/[:.]/);
-    if (sep === -1) return undefined;
-    const ns = prefixed.slice(0, sep);
-    for (const [method, record] of this.#deps.ws.handlers()) {
-      if (method.startsWith(`${ns}.`)) return record.plugin;
-    }
-    return this.#deps.plugins().find((p) => p.id === `valet-${ns}` || p.id === ns)?.id;
   }
 
   /** publish(): per-topic seq, ring-buffered, fanned out to subscribers. */
@@ -92,63 +97,62 @@ export class WsHub {
     }
   };
 
-  open(ws: ServerWebSocket<WsSocketData>): void {
+  open(ws: HubSocket): void {
     this.#sockets.add(ws);
   }
 
-  close(ws: ServerWebSocket<WsSocketData>): void {
+  close(ws: HubSocket): void {
     ws.data.closed = true;
     this.#sockets.delete(ws);
     ws.data.subs.clear();
   }
 
-  /** Rewrites principal and caller.actor when the same principal is still identified; closes (4401) otherwise. */
-  async reidentifySockets(): Promise<void> {
+  #kick(ws: HubSocket): void {
+    this.close(ws);
+    // spec-gap: ServerFrame has no error frame, so the close code is the only signal.
+    try {
+      ws.close(4401, "unauthenticated");
+    } catch {
+      // already closing
+    }
+  }
+
+  /**
+   * Re-identifies every channel: a different or missing principal, or an inactive credential, closes it (4401).
+   * Subscriptions whose permission no longer holds are dropped with a `denied` result; nothing is ever widened.
+   */
+  async revalidate(): Promise<void> {
     await Promise.all(
       [...this.#sockets].map(async (ws) => {
-        const { headers, url, principal } = ws.data;
-        let current: Principal | undefined;
+        let found: Reidentified = { ok: false };
         try {
-          current = await this.#deps.identify(new Request(url.href, { headers }));
+          found = await this.#deps.reidentify(ws.data);
         } catch (error) {
           this.#deps.logger.error("ws re-identify failed", { error: String(error) });
         }
-        if (current !== undefined && current.id === principal?.id) {
-          ws.data.principal = current;
-          ws.data.caller = {
-            ...ws.data.caller,
-            actor: { principalId: current.id, role: current.role },
-          };
-          return;
-        }
-        ws.data.closed = true;
-        ws.data.subs.clear();
-        // spec-gap: ServerFrame has no error frame, so the close code is the only signal.
-        try {
-          ws.close(4401, "unauthenticated");
-        } catch {
-          // already closing
+        if (!found.ok || found.principal.id !== ws.data.principal?.id) return this.#kick(ws);
+        ws.data.principal = found.principal;
+        ws.data.caller = found.caller;
+        for (const topic of [...ws.data.subs]) {
+          const d = this.#deps.authorize(found.caller, "ws.sub", topic, { type: "sub", topics: [topic] });
+          if (d.allow) continue;
+          ws.data.subs.delete(topic);
+          send(ws, deniedFrame(topic, d));
         }
       }),
     );
   }
 
-  async message(ws: ServerWebSocket<WsSocketData>, raw: string | Buffer): Promise<void> {
-    const task = (ws.data.chain ?? Promise.resolve()).then(() => this.#handle(ws, raw));
+  async message(ws: HubSocket, frame: ClientFrame): Promise<void> {
+    const task = (ws.data.chain ?? Promise.resolve()).then(() => this.#handle(ws, frame));
     ws.data.chain = task.catch(() => undefined);
     await task;
   }
 
-  async #handle(ws: ServerWebSocket<WsSocketData>, raw: string | Buffer): Promise<void> {
-    let frame: ClientFrame;
+  async #handle(ws: HubSocket, frame: ClientFrame): Promise<void> {
+    if (ws.data.closed) return;
     try {
-      frame = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8")) as ClientFrame;
-    } catch {
-      send(ws, { type: "result", id: "", ok: false, error: { code: "bad_frame", message: "invalid JSON" } });
-      return;
-    }
-    try {
-      switch (frame.type) {
+      switch (frame?.type) {
         case "ping":
           send(ws, { type: "pong" });
           return;
@@ -175,38 +179,33 @@ export class WsHub {
   }
 
   async #admit(
-    ws: ServerWebSocket<WsSocketData>,
+    ws: HubSocket,
     kind: "ws.sub" | "ws.call",
     method: string,
     path: string,
-  ): Promise<{ denied?: { by?: string; reason: string } }> {
-    const owner = kind === "ws.sub" ? this.ownerOf(path) : this.#deps.ws.handlers().get(path)?.plugin;
+    frame: ClientFrame,
+  ): Promise<{ by?: string; reason: string } | undefined> {
+    const d = this.#deps.authorize(ws.data.caller, kind, path, frame);
+    if (!d.allow) return d;
+    const owner = this.#deps.ownerOf(kind, path);
     const res = await this.#deps.bus.emitAs(ws.data.caller, "control.request", {
       kind,
       method,
       path,
       ...(owner === undefined ? {} : { plugin: owner }),
     });
-    if (!res.cancelled) return {};
-    return { denied: { by: res.denied?.by, reason: res.denied?.reason ?? res.cancelReason ?? "denied" } };
+    if (!res.cancelled) return undefined;
+    return { by: res.denied?.by, reason: res.denied?.reason ?? res.cancelReason ?? "denied" };
   }
 
-  async #onSub(
-    ws: ServerWebSocket<WsSocketData>,
-    frame: { topics: string[]; since?: Record<string, number> },
-  ): Promise<void> {
+  async #onSub(ws: HubSocket, frame: { topics: string[]; since?: Record<string, number> }): Promise<void> {
     for (const topic of frame.topics ?? []) {
       // Before admit, so a sub with no `since` can replay frames published while it waited.
       const snapshot = this.#seq.get(topic) ?? 0;
-      const { denied } = await this.#admit(ws, "ws.sub", "sub", topic);
+      const denied = await this.#admit(ws, "ws.sub", "sub", topic, { type: "sub", topics: [topic] });
       if (denied) {
         // spec-gap: sub carries no id, so a denied topic reports with the topic as id.
-        send(ws, {
-          type: "result",
-          id: topic,
-          ok: false,
-          error: { code: "denied", message: `${denied.by ?? "?"}: ${denied.reason}` },
-        });
+        send(ws, deniedFrame(topic, denied));
         continue;
       }
       const since = frame.since?.[topic];
@@ -229,19 +228,11 @@ export class WsHub {
     }
   }
 
-  async #onCall(
-    ws: ServerWebSocket<WsSocketData>,
-    frame: { id: string; method: string; params?: unknown },
-  ): Promise<void> {
+  async #onCall(ws: HubSocket, frame: { id: string; method: string; params?: unknown }): Promise<void> {
     const handler = this.#deps.ws.handlers().get(frame.method);
-    const { denied } = await this.#admit(ws, "ws.call", frame.method, frame.method);
+    const denied = await this.#admit(ws, "ws.call", frame.method, frame.method, { type: "call", ...frame });
     if (denied) {
-      send(ws, {
-        type: "result",
-        id: frame.id,
-        ok: false,
-        error: { code: "denied", message: `${denied.by ?? "?"}: ${denied.reason}` },
-      });
+      send(ws, deniedFrame(frame.id, denied));
       return;
     }
     if (!handler) {
