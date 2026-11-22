@@ -199,7 +199,7 @@ export class SettingsService {
     if (model === undefined) return modelError;
     this.loadLayers(entry);
     let errors = this.recompute(entry);
-    if (Object.keys(errors).length > 0) {
+    if (Object.keys(errors).length > 0 && Object.keys(entry.desired.res.fatal).length === 0) {
       const restored = this.restoreFromBackup(entry);
       if (restored) errors = this.recompute(entry);
     }
@@ -357,11 +357,32 @@ export class SettingsService {
       const values = this.mergeValues(e, e.file, nextUser);
       const errors = validateValues(model, values, keys);
       if (Object.keys(errors).length > 0) throw new SettingsError(400, firstLine(errors), errors);
-      const res = resolveBlock(model, values, this.resolver);
+      const res = resolveBlock(
+        model,
+        values,
+        this.resolver,
+        new Set([...Object.keys(e.file), ...Object.keys(nextUser)]),
+      );
       const fatal = Object.fromEntries(
         Object.entries(res.fatal).filter(([p]) => keys.some((k) => under(p, k))),
       );
       if (Object.keys(fatal).length > 0) throw new SettingsError(400, firstLine(fatal), fatal);
+      const retained = new Set(
+        Object.keys(values).filter((k) => Object.keys(res.fatal).some((p) => under(p, k))),
+      );
+      for (const key of retained) {
+        if (key in e.applied.res.block) res.block[key] = e.applied.res.block[key];
+        else delete res.block[key];
+      }
+      if (retained.size > 0) {
+        res.pending = [
+          ...res.pending.filter((p) => !retained.has(p.key)),
+          ...e.applied.res.pending.filter((p) => retained.has(p.key)),
+        ];
+        for (const [ref, value] of e.applied.res.resolved)
+          if (!res.resolved.has(ref)) res.resolved.set(ref, value);
+        for (const watch of e.applied.res.watches) res.watches.add(watch);
+      }
       this.checkProjectsFor(e, model, values, keys);
       try {
         await e.hooks?.runChecks(res.block, e.applied.res.block);
@@ -370,7 +391,7 @@ export class SettingsService {
       }
       e.user = nextUser;
       e.desired = { values, res };
-      e.issues = { ...res.issues };
+      e.issues = { ...res.issues, ...res.fatal };
     }
     if (keys.length > 0 || patch.enabled !== undefined) {
       const fileEnabled = this.fileConfig.plugins[id]?.enabled;
@@ -496,7 +517,12 @@ export class SettingsService {
     const restart: string[] = [];
     for (const e of this.entries.values()) {
       if (e.model === undefined || !hasStaticRefs(e.desired.res)) continue;
-      const res = resolveBlock(e.model, e.desired.values, this.resolver);
+      const res = resolveBlock(
+        e.model,
+        e.desired.values,
+        this.resolver,
+        new Set([...Object.keys(e.file), ...Object.keys(e.user)]),
+      );
       if (Object.keys(res.fatal).length > 0) {
         e.issues = { ...res.issues, ...res.fatal };
         continue;
@@ -617,9 +643,14 @@ export class SettingsService {
       e.desired = { values, res: EMPTY };
       return errors;
     }
-    const res = resolveBlock(model, values, this.resolver);
+    const res = resolveBlock(
+      model,
+      values,
+      this.resolver,
+      new Set([...Object.keys(e.file), ...Object.keys(e.user)]),
+    );
     e.desired = { values, res };
-    e.issues = { ...res.issues };
+    e.issues = { ...res.issues, ...res.fatal };
     return res.fatal;
   }
 

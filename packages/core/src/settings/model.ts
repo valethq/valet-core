@@ -194,7 +194,7 @@ export interface ResolveResult {
   pending: PendingLeaf[];
   /** Optional settings whose ref failed (now unset), and permission warnings. */
   issues: PathErrors;
-  /** Required settings whose ref failed: the plugin can't run with this block. */
+  /** Required settings or stored secret refs that failed: the plugin can't run with this block. */
   fatal: PathErrors;
   /** ref text -> resolved value, for scrubbing and for refs inside pending leaves. */
   resolved: Map<string, string>;
@@ -236,7 +236,12 @@ export function parseResolved(node: Node, text: string, path: string): unknown {
 }
 
 /** Resolves `secret:`, `file:` and `env:` in a values block. `cmd:` leaves stay raw and are listed as pending. */
-export function resolveBlock(model: Model, values: Block, resolve: StaticResolve): ResolveResult {
+export function resolveBlock(
+  model: Model,
+  values: Block,
+  resolve: StaticResolve,
+  storedKeys: ReadonlySet<string> = new Set(),
+): ResolveResult {
   const res: ResolveResult = {
     block: { ...values },
     pending: [],
@@ -255,17 +260,21 @@ export function resolveBlock(model: Model, values: Block, resolve: StaticResolve
       if (typeof v !== "string" || node.refs.length === 0 || !v.includes("${")) return v;
       const tokens = tokenize(v);
       let failed: string | undefined;
+      let failedStoredSecret = false;
       for (const t of tokens) {
         if (!("ref" in t) || t.resolver === "cmd" || res.resolved.has(t.ref)) continue;
+        if (failed !== undefined && (t.resolver !== "secret" || !storedKeys.has(key))) continue;
         try {
           const r = resolve(t.resolver, t.arg, t.ref);
           res.resolved.set(t.ref, r.value);
           if (r.watch) res.watches.add(r.watch);
           if (r.warning) res.issues[path] = r.warning;
         } catch (e) {
-          failed = (e as Error).message;
+          if (!failedStoredSecret) {
+            failed = (e as Error).message;
+            failedStoredSecret = t.resolver === "secret" && storedKeys.has(key);
+          }
           if (t.resolver === "file" && isAbsolute(expandHome(t.arg))) res.watches.add(expandHome(t.arg));
-          break;
         }
       }
       if (failed === undefined && tokens.some((t) => "ref" in t && t.resolver === "cmd")) {
@@ -273,12 +282,12 @@ export function resolveBlock(model: Model, values: Block, resolve: StaticResolve
         return v;
       }
       try {
-        if (failed !== undefined) throw new Error(`${key}: ${failed}`);
+        if (failed !== undefined) throw new Error(`${path}: ${failed}`);
         const text = interpolate(tokens, (t) => res.resolved.get(t.ref) as string);
         return parseResolved(node, text, path);
       } catch (e) {
         const msg = (e as Error).message;
-        if (required || node.input.required === true) res.fatal[path] = msg;
+        if (failedStoredSecret || required || node.input.required === true) res.fatal[path] = msg;
         else res.issues[path] = msg;
         return DROP;
       }

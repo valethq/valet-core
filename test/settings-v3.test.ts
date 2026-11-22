@@ -1,6 +1,6 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: settings refs are written ${resolver:arg}
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { boot, type ValetKernel } from "@valethq/core";
 import type { Project } from "@valethq/sdk";
@@ -95,16 +95,36 @@ describe("settings v3: load", () => {
     expect(state(env.kernel, "fx-baddoc")?.error).toContain('unknown type "fancy"');
   });
 
-  test("a required ref that fails stops the plugin", async () => {
-    const env = await bootFx(fxRoot("settings-v3"), {
-      watchSettings: false,
-      config: { plugins: { "fx-v3": { config: { apiKey: "${secret:missing_key}" } } } },
+  for (const layer of ["file", "settings"] as const) {
+    test(`a missing optional secret stored in ${layer} fails instead of using the default or backup`, async () => {
+      const config = { apiKey: "${secret:gone}" };
+      const { kernel } = await up({
+        ...(layer === "file" ? { config } : { settings: { plugins: { "fx-v3": { config } } } }),
+        before: (home) =>
+          writeJson(join(home, "settings.json.bak"), {
+            plugins: { "fx-v3": { config: { apiKey: "${secret:fx_key}" } } },
+          }),
+      });
+      expect(state(kernel, "fx-v3")?.state).toBe("failed");
+      expect(state(kernel, "fx-v3")?.error).toContain("apiKey: ${secret:gone} not found");
+      expect(docOf(kernel)?.issues?.apiKey).toBe("apiKey: ${secret:gone} not found");
+      expect(docOf(kernel)?.values.apiKey).toBe("${secret:gone}");
     });
-    kernels.push(env.kernel);
-    expect(state(env.kernel, "fx-v3")?.state).toBe("active");
-    // apiKey is optional: the failure is an issue and the key is unset.
+  }
+
+  test("an optional missing default secret loads unset with an issue", async () => {
+    const { kernel } = await up({ before: (home) => unlinkSync(join(home, "secrets", "fx_key")) });
+    expect(state(kernel, "fx-v3")?.state).toBe("active");
     expect(v3().ctx.config.apiKey).toBeUndefined();
-    expect(docOf(env.kernel)?.issues?.apiKey).toBe("apiKey: ${secret:missing_key} not found");
+    expect(docOf(kernel)?.issues?.apiKey).toBe("apiKey: ${secret:fx_key} not found");
+  });
+
+  test("saving a missing optional secret is refused without replacing the applied value", async () => {
+    const { kernel } = await up();
+    expect(await errorsOf(kernel.updateSettings("fx-v3", { config: { apiKey: "${secret:gone}" } }))).toEqual({
+      apiKey: "apiKey: ${secret:gone} not found",
+    });
+    expect(v3().ctx.config.apiKey).toBe("k-123");
   });
 
   test("a broken config-file value fails the plugin at load", async () => {
@@ -429,10 +449,30 @@ describe("settings v3: watchers", () => {
     await until(() => v3().ctx.config.header === "now");
   });
 
-  test("a plugin whose only secret ref failed picks the secret up once it is written", async () => {
-    const { home } = await up({ watch: true, config: { apiKey: "${secret:later_key}" } });
+  test("a plugin whose default secret ref failed picks the secret up once it is written", async () => {
+    const { home } = await up({ watch: true, before: (home) => unlinkSync(join(home, "secrets", "fx_key")) });
     expect(v3().ctx.config.apiKey).toBeUndefined();
-    secret(home, "later_key", "late");
+    secret(home, "fx_key", "late");
     await until(() => v3().ctx.config.apiKey === "late");
+  });
+
+  test("a deleted stored secret keeps the last good value and reports the error, not the default", async () => {
+    const { kernel, home } = await up({
+      watch: true,
+      config: { apiKey: "${secret:chosen}" },
+      before: (home) => secret(home, "chosen", "chosen-value"),
+    });
+    expect(v3().ctx.config.apiKey).toBe("chosen-value");
+    unlinkSync(join(home, "secrets", "chosen"));
+    await until(() => docOf(kernel)?.issues?.apiKey !== undefined);
+    expect(docOf(kernel)?.issues?.apiKey).toBe("apiKey: ${secret:chosen} not found");
+    expect(state(kernel, "fx-v3")?.state).toBe("active");
+    expect(v3().ctx.config.apiKey).toBe("chosen-value");
+    expect(v3().calls).toEqual([]);
+    await kernel.updateSettings("fx-v3", { config: { threshold: 0.4 } });
+    expect(v3().ctx.config.threshold).toBe(0.4);
+    expect(v3().ctx.config.apiKey).toBe("chosen-value");
+    expect(docOf(kernel)?.issues?.apiKey).toBe("apiKey: ${secret:chosen} not found");
+    expect(v3().calls.at(-1)?.apiKey).toBe("chosen-value");
   });
 });

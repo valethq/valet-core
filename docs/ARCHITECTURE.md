@@ -1488,7 +1488,8 @@ ignores `configSchema`.
   edit raced with a queued save can't be silently overwritten.
 - A save runs the pipeline on the result, except `cmd:` (resolved on read, from the TTL cache; see References). A
   schema or required failure is 400 and writes nothing. A `secret:`, `file:` or `env:` ref that fails to resolve
-  blocks the save only for a required setting; otherwise the save goes through and the error is reported. A
+  blocks the save for a required setting; a touched setting whose stored `secret:` ref cannot resolve is also
+  rejected, even when optional. Otherwise the save goes through and the error is reported. A
   throwing `onConfigChange` does not reject the save (see Scopes); a throwing `onConfigCheck` does.
 - A user save is checked against every project that overrides this plugin **for the keys it touched**: each project
   layer over the new desired user block must validate those keys, or the save is 400 with the failures keyed
@@ -1643,7 +1644,9 @@ Rules:
 - **Permissions.** If a `secret:` or `file:` target is readable by group or others (mode other than `0600`), core
   logs a warning and the UI shows it on the setting.
 - **Failure.** At load, a required setting whose `secret:`, `file:` or `env:` ref fails stops the plugin with
-  `<plugin>.<setting>: ${file:...} not found`; an optional one is treated as unset and the UI shows the error. A
+  `<plugin>.<setting>: ${file:...} not found`. A stored `secret:` ref (from the file or settings layer) that fails
+  also stops the plugin, even for an optional setting, and never falls back to the default. An optional ref from
+  the schema default, or an optional `file:` or `env:` ref, is treated as unset and the UI shows the error. A
   later re-resolve that fails keeps the last good applied value and the UI shows the error. A `cmd:` failure never
   rejects a save or stops the plugin: the read keeps the last good value, or is unset if there is none, and the
   error is reported in `issues`. A listener that throws on a re-resolve follows the listener rule in Scopes.
