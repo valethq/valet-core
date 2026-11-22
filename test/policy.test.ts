@@ -464,7 +464,8 @@ describe("reload", () => {
       doc({ grants: [{ to: ["principal:prn_other"], allow: ["search:query"] }] }),
     );
     const deadline = Date.now() + 5000;
-    while (!h.check(principal("prn_other"), "search:query") && Date.now() < deadline) await Bun.sleep(25);
+    while (h.events.filter((e) => e.name === "policy.changed").length < 2 && Date.now() < deadline)
+      await Bun.sleep(25);
     expect(h.check(principal("prn_other"), "search:query")).toBe(true);
     expect(h.events.filter((e) => e.name === "policy.changed").length).toBeGreaterThanOrEqual(2);
   });
