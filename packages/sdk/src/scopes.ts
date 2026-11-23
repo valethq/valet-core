@@ -5,6 +5,7 @@ import type { InferenceProvider } from "./inference";
 import type { MessagePlatform } from "./platform";
 import type { Disposable } from "./plugin";
 import type { PolicyProvider } from "./policy";
+import type { Schedule } from "./schedule";
 import type { SettingsContribution } from "./settings";
 import type { ToolProvider } from "./tools";
 import type { Transport } from "./transport";
@@ -18,6 +19,7 @@ export interface ValetScopes {
   settings: SettingsContribution; // settings@2, defined by valet-ui
   policy: PolicyProvider; // cardinality one, provided by valet-policy
   transport: Transport;
+  schedule: Schedule; // schedule@1, cardinality one, provided by valet-scheduler
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 

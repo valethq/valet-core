@@ -65,7 +65,7 @@ graph TD
   ui["valet-ui (own port)"] -. REST/WS client .-> http
   auth[valet-auth: identity@1] --> http
   discord[valet-discord: platform@1] --> agent
-  sched[valet-scheduler] --> agent
+  sched[valet-scheduler: schedule@1] --> agent
   skills[valet-skills] --> ctxm
 ```
 
@@ -80,7 +80,7 @@ graph TD
 | Config and secrets loading | Platforms (`valet-discord`), schedules (`valet-scheduler`), skills (`valet-skills`) |
 | Scope registry (provide/consume and cardinality) | Defining new scopes beyond the core set |
 
-Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`, `context@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is implemented and registered (`defineScope`) by `valet-contextmanager`; core only ships its types. Any plugin can define a scope of its own the same way.
+Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`, `context@1`, `schedule@1`, and others such as `transport@1` and `policy@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is implemented and registered (`defineScope`) by `valet-contextmanager`; core only ships its types. Any plugin can define a scope of its own the same way.
 
 ## 4. Repo layout and packages
 
@@ -247,6 +247,7 @@ export interface ValetScopes {
   platform: MessagePlatform;
   identity: IdentityProvider;
   context: ContextManager;   // provided by valet-contextmanager
+  schedule: Schedule;        // schedule@1, provided by valet-scheduler
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 
@@ -528,6 +529,63 @@ export interface ContextManager {
   shouldCompact(req: { sessionId: string; model: ModelInfo; lastUsage: { inputTokens?: number; contextTokens?: number } }): Promise<boolean>;
   /** Writes a compaction part: a valet summary (`by: "valet"`), or a marker for a harness that compacted itself. Older messages stay stored but leave the prompt window. */
   compact(req: { sessionId: string; reason: "auto" | "manual" | "resume" }): Promise<{ summaryPartId: string }>;
+}
+```
+
+### 6.5 `schedule@1`: scheduled jobs (provided by `valet-scheduler`)
+
+Jobs are entities, not sessions. The types live in the SDK (`schedule.ts`). Cardinality is `one`. HTTP, the agent tool, the Jobs UI and later consumers (for example a memory "dreaming" plugin) go through this scope rather than scheduler internals.
+
+```ts
+export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted";
+
+export type ScheduleTrigger =
+  | { type: "cron"; expr: string }
+  | { type: "interval"; everyMs: number }
+  | { type: "at"; at: number }
+  | { type: "manual" };
+
+export interface ScheduleRetention { keepLast?: number; keepDays?: number }
+
+export interface ScheduleJob {
+  id: string; title: string; enabled: boolean; projectId: string;
+  model: ModelRef; prompt: string; creatorPrincipalId: string; role: Role;
+  trigger: ScheduleTrigger; timezone: string; retention: ScheduleRetention;
+  notes: string | null;
+  lastRunAt: number | null; lastStatus: Exclude<ScheduleJobStatus, "running"> | null;
+  lastSessionId: string | null; nextRunAt: number | null;
+  createdAt: number; updatedAt: number;
+  schedule?: string; // plain-language schedule for UIs
+}
+
+export interface ScheduleRun {
+  id: string; jobId: string; sessionId: string | null; status: ScheduleJobStatus;
+  startedAt: number; endedAt: number | null; error: string | null;
+}
+
+export interface ScheduleJobCreate {
+  title: string; projectId: string; model: ModelRef; prompt: string; trigger: ScheduleTrigger;
+  timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role; enabled?: boolean;
+  creatorPrincipalId: string; // job role is capped at this principal's role
+}
+
+export interface ScheduleJobUpdate {
+  title?: string; enabled?: boolean; projectId?: string; model?: ModelRef; prompt?: string;
+  trigger?: ScheduleTrigger; timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role;
+}
+
+export interface ScheduleFireResult { job: ScheduleJob; skipped?: boolean; sessionId?: string }
+
+export interface Schedule {
+  list(): ScheduleJob[];
+  get(id: string): ScheduleJob | undefined;
+  create(input: ScheduleJobCreate): ScheduleJob | Promise<ScheduleJob>;
+  update(id: string, patch: ScheduleJobUpdate): ScheduleJob | Promise<ScheduleJob>;
+  enable(id: string): ScheduleJob | Promise<ScheduleJob>;
+  disable(id: string): ScheduleJob | Promise<ScheduleJob>;
+  delete(id: string): void | Promise<void>;
+  fire(jobId: string, opts?: { manual?: boolean }): Promise<ScheduleFireResult>;
+  runs(jobId: string, opts?: { limit?: number }): ScheduleRun[];
 }
 ```
 
@@ -1018,7 +1076,7 @@ export interface DirListing {
 | 5. Compaction and resume | `valet-contextmanager` (compaction), `valet-agent` (resume policy) | `compaction` parts, `run.interrupted`, FTS |
 | 6. Discord with owner/friend tiers | `valet-discord` | `platform@1`, principals and identities, effective role, `tool.call` policy |
 | Skills (rank 8) | `valet-skills` | Lists `skills/*/SKILL.md` in the preamble, `skill_read` tool |
-| Scheduled jobs and nightly memory "dreaming" (rank 9) | `valet-scheduler` (v1); dreaming as a later consumer | Job entities; each fire() spawns a fresh work session |
+| Scheduled jobs and nightly memory "dreaming" (rank 9) | `valet-scheduler` (v1); dreaming as a later consumer | `schedule@1`, job entities; each fire() spawns a fresh work session |
 
 ### 11.1 `valet-agent`
 
@@ -1101,10 +1159,10 @@ Jobs are entities, not sessions. A job has an id, title, model, prompt, project,
 - **Process:** in-process timer (sleep until `nextRunAt` / short tick); recompute on activate; clear in `onDispose`. No systemd timers.
 - **ACL:** `scheduler:job.read` and `scheduler:job.write`. Anyone with `job.write` may create jobs; the job's role is capped at the creator's role.
 - **Settings v3:** master enable, default timezone (`America/New_York`), default retention (keep last N runs and/or N days).
-- **HTTP:** CRUD + fire under `/plugins/valet-scheduler/...`.
-- **Agent tool:** thin create/list/update/enable/disable/fire, respecting ACL and the role cap.
+- **Provides `schedule@1`.** create/list/get/update/enable/disable/delete, `fire(jobId)`, and run history. Cardinality `one`.
+- **HTTP / agent tool / Jobs UI:** all go through `schedule@1` (routes under `/plugins/valet-scheduler/...`; thin `scheduler` tool). They do not reach into scheduler internals.
 - **UI:** a tucked-away Jobs section (hidden by default). Work sessions with `settings.agent.jobId` stay out of the main session list. Delivery through `platform@1` is reserved for later.
-- **Deferred:** platform delivery, utility-model summaries of prior runs, event triggers. Nightly memory "dreaming" is a later plugin that calls `fire()`.
+- **Deferred:** platform delivery, utility-model summaries of prior runs, event triggers. Nightly memory "dreaming" is a later plugin that consumes `schedule@1` (e.g. `scopes.get("schedule").fire(...)`).
 
 ## 12. Boot, config and settings
 
