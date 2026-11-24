@@ -2,13 +2,25 @@ import type { ModelRef } from "./inference";
 import type { Role } from "./tools";
 
 /** Terminal statuses plus in-flight `running` for run-history rows. A job's `lastStatus` never stores `running`. */
-export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted";
+export type ScheduleJobStatus =
+  | "running"
+  | "ok"
+  | "failed"
+  | "timed_out"
+  | "skipped"
+  | "interrupted"
+  | "paused";
 
 export type ScheduleTrigger =
   | { type: "cron"; expr: string }
   | { type: "interval"; everyMs: number }
   | { type: "at"; at: number }
   | { type: "manual" };
+
+/** Where each fire() delivers the prompt. Default is a fresh work session. */
+export type ScheduleTarget =
+  | { kind: "fresh" }
+  | { kind: "session"; sessionId: string };
 
 export interface ScheduleRetention {
   keepLast?: number;
@@ -25,9 +37,12 @@ export interface ScheduleJob {
   creatorPrincipalId: string;
   role: Role;
   trigger: ScheduleTrigger;
+  target: ScheduleTarget;
   timezone: string;
   retention: ScheduleRetention;
   notes: string | null;
+  /** Set when the job is paused (e.g. pinned session missing or archived); cleared on a successful repair. */
+  pauseReason: string | null;
   lastRunAt: number | null;
   lastStatus: Exclude<ScheduleJobStatus, "running"> | null;
   lastSessionId: string | null;
@@ -54,6 +69,8 @@ export interface ScheduleJobCreate {
   model: ModelRef;
   prompt: string;
   trigger: ScheduleTrigger;
+  /** Default `{ kind: "fresh" }`. */
+  target?: ScheduleTarget;
   timezone?: string;
   retention?: ScheduleRetention;
   notes?: string | null;
@@ -70,15 +87,20 @@ export interface ScheduleJobUpdate {
   model?: ModelRef;
   prompt?: string;
   trigger?: ScheduleTrigger;
+  target?: ScheduleTarget;
   timezone?: string;
   retention?: ScheduleRetention;
   notes?: string | null;
   role?: Role;
+  /** Clear a pause by setting null after fixing the target. */
+  pauseReason?: string | null;
 }
 
 export interface ScheduleFireResult {
   job: ScheduleJob;
   skipped?: boolean;
+  /** True when the job was paused (e.g. pinned session gone) instead of firing. */
+  paused?: boolean;
   sessionId?: string;
 }
 

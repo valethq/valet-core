@@ -537,7 +537,7 @@ export interface ContextManager {
 Jobs are entities, not sessions. The types live in the SDK (`schedule.ts`). Cardinality is `one`. HTTP, the agent tool, the Jobs UI and later consumers (for example a memory "dreaming" plugin) go through this scope rather than scheduler internals.
 
 ```ts
-export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted";
+export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted" | "paused";
 
 export type ScheduleTrigger =
   | { type: "cron"; expr: string }
@@ -545,13 +545,17 @@ export type ScheduleTrigger =
   | { type: "at"; at: number }
   | { type: "manual" };
 
+export type ScheduleTarget =
+  | { kind: "fresh" }
+  | { kind: "session"; sessionId: string };
+
 export interface ScheduleRetention { keepLast?: number; keepDays?: number }
 
 export interface ScheduleJob {
   id: string; title: string; enabled: boolean; projectId: string;
   model: ModelRef; prompt: string; creatorPrincipalId: string; role: Role;
-  trigger: ScheduleTrigger; timezone: string; retention: ScheduleRetention;
-  notes: string | null;
+  trigger: ScheduleTrigger; target: ScheduleTarget; timezone: string; retention: ScheduleRetention;
+  notes: string | null; pauseReason: string | null;
   lastRunAt: number | null; lastStatus: Exclude<ScheduleJobStatus, "running"> | null;
   lastSessionId: string | null; nextRunAt: number | null;
   createdAt: number; updatedAt: number;
@@ -565,16 +569,18 @@ export interface ScheduleRun {
 
 export interface ScheduleJobCreate {
   title: string; projectId: string; model: ModelRef; prompt: string; trigger: ScheduleTrigger;
+  target?: ScheduleTarget; // default { kind: "fresh" }
   timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role; enabled?: boolean;
   creatorPrincipalId: string; // job role is capped at this principal's role
 }
 
 export interface ScheduleJobUpdate {
   title?: string; enabled?: boolean; projectId?: string; model?: ModelRef; prompt?: string;
-  trigger?: ScheduleTrigger; timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role;
+  trigger?: ScheduleTrigger; target?: ScheduleTarget; timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role;
+  pauseReason?: string | null;
 }
 
-export interface ScheduleFireResult { job: ScheduleJob; skipped?: boolean; sessionId?: string }
+export interface ScheduleFireResult { job: ScheduleJob; skipped?: boolean; paused?: boolean; sessionId?: string }
 
 export interface Schedule {
   list(): ScheduleJob[];
@@ -1151,10 +1157,11 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
 
 ### 11.8 `valet-scheduler`
 
-Jobs are entities, not sessions. A job has an id, title, model, prompt, project, creator, role (never above the creator's), trigger, timezone, retention and optional notes. Each `fire()` opens a **fresh** work session in `projectId` with `settings.model` and `settings.agent.jobId` (do not set `parentSessionId`; that is for subagents), optionally prepends the final assistant replies from the last N runs for continuity, and posts the prompt through `store.as({ principalId: creator }).messages.create` with `authorPrincipalId` stamped. `valet-agent`'s existing `after("message.create")` starts the run; the scheduler does not change agent.
+Jobs are entities, not sessions. A job has an id, title, model, prompt, project, creator, role (never above the creator's), trigger, target (`fresh` work session or one pinned session), timezone, retention and optional notes. Each `fire()` either opens a **fresh** work session in `projectId` with `settings.model` and `settings.agent.jobId` (do not set `parentSessionId`; that is for subagents), optionally prepends the final assistant replies from the last N runs for continuity, and posts the prompt through `store.as({ principalId: creator }).messages.create` with `authorPrincipalId` stamped. `valet-agent`'s existing `after("message.create")` starts the run; the scheduler does not change agent.
 
 - **Triggers (v1):** 5-field cron (in the job timezone), interval, one-off (`at`, disable after success), and manual Run now. All go through the same `fire()` path.
-- **Overlap (default):** if the job fires while its previous work session is still running, post a notice into that session saying the job just fired again, leave the run going, and do not start a second run (status `skipped`).
+- **Target:** `{ kind: "fresh" }` (default) spawns a new work session with `settings.agent.jobId`. `{ kind: "session", sessionId }` posts into that existing session (message `meta.agent.jobId`) so valet-agent wakes it. Creating or updating a pinned target requires the creator to hold `core:session.write` on it. If the pinned session is later missing or archived, the job is paused (`pauseReason`, disabled) rather than falling back to fresh.
+- **Overlap (default):** if the job fires while the target session (pinned) or the previous fresh work session is still running, post a notice into that session saying the job just fired again, leave the run going, and do not queue a second prompt (status `skipped`).
 - **Missed runs:** if Valet was down through due times, catch up **once** on boot, then schedule the next future time. No backlog.
 - **Process:** in-process timer (sleep until `nextRunAt` / short tick); recompute on activate; clear in `onDispose`. No systemd timers.
 - **ACL:** `scheduler:job.read` and `scheduler:job.write`. Anyone with `job.write` may create jobs; the job's role is capped at the creator's role.
