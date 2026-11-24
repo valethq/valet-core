@@ -66,7 +66,8 @@ export interface ScheduleRun {
 /** Which trigger caused this fire (manual always reports `"manual"` even if the job's schedule is cron). */
 export type ScheduleFireTriggerKind = ScheduleTrigger["type"];
 
-export type ScheduleFireOutcome = "success" | "error" | "skipped";
+/** `running` is written at fire time and updated to success/error at run end. */
+export type ScheduleFireOutcome = "running" | "success" | "error" | "skipped";
 
 /** Internal fire log for graphing success vs failure over time (plugin-owned, capped retention). */
 export interface ScheduleFireRecord {
