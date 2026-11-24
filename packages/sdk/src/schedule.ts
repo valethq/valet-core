@@ -8,8 +8,7 @@ export type ScheduleJobStatus =
   | "failed"
   | "timed_out"
   | "skipped"
-  | "interrupted"
-  | "paused";
+  | "interrupted";
 
 export type ScheduleTrigger =
   | { type: "cron"; expr: string }
@@ -32,17 +31,18 @@ export interface ScheduleJob {
   title: string;
   enabled: boolean;
   projectId: string;
-  model: ModelRef;
+  /** When set, fresh sessions and pinned fires use this model; when null, pinned fires keep the session model. */
+  model: ModelRef | null;
   prompt: string;
   creatorPrincipalId: string;
   role: Role;
   trigger: ScheduleTrigger;
   target: ScheduleTarget;
+  /** Pinned only: compact the session via context@1 before posting. Ignored/rejected on fresh. */
+  compactOnRun: boolean;
   timezone: string;
   retention: ScheduleRetention;
   notes: string | null;
-  /** Set when the job is paused (e.g. pinned session missing or archived); cleared on a successful repair. */
-  pauseReason: string | null;
   lastRunAt: number | null;
   lastStatus: Exclude<ScheduleJobStatus, "running"> | null;
   lastSessionId: string | null;
@@ -66,11 +66,14 @@ export interface ScheduleRun {
 export interface ScheduleJobCreate {
   title: string;
   projectId: string;
-  model: ModelRef;
+  /** Optional. Fresh sessions omit settings.model when null; pinned fires then keep the session model. */
+  model?: ModelRef | null;
   prompt: string;
   trigger: ScheduleTrigger;
   /** Default `{ kind: "fresh" }`. */
   target?: ScheduleTarget;
+  /** Default false. Only valid for `{ kind: "session" }` targets. */
+  compactOnRun?: boolean;
   timezone?: string;
   retention?: ScheduleRetention;
   notes?: string | null;
@@ -84,30 +87,30 @@ export interface ScheduleJobUpdate {
   title?: string;
   enabled?: boolean;
   projectId?: string;
-  model?: ModelRef;
+  model?: ModelRef | null;
   prompt?: string;
   trigger?: ScheduleTrigger;
   target?: ScheduleTarget;
+  compactOnRun?: boolean;
   timezone?: string;
   retention?: ScheduleRetention;
   notes?: string | null;
   role?: Role;
-  /** Clear a pause by setting null after fixing the target. */
-  pauseReason?: string | null;
 }
 
 export interface ScheduleFireResult {
   job: ScheduleJob;
+  /** Timed/disabled skip, or overlap skip. Manual fire is never skipped for disabled. */
   skipped?: boolean;
-  /** True when the job was paused (e.g. pinned session gone) instead of firing. */
-  paused?: boolean;
   sessionId?: string;
+  /** Set when the fire recorded a failed run without throwing (e.g. pinned session gone). */
+  error?: string;
 }
 
 /**
  * schedule@1: job entities and fire(). Provided by valet-scheduler (cardinality one).
- * HTTP, the agent tool, the Jobs UI and later consumers (e.g. memory dreaming) use this scope
- * rather than scheduler internals.
+ * Triggers (cron, interval, at, manual) all share fire(); manual / Run now always runs even when
+ * the job or master switch is disabled.
  */
 export interface Schedule {
   list(): ScheduleJob[];
