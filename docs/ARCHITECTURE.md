@@ -582,6 +582,13 @@ export interface ScheduleJobUpdate {
 
 export interface ScheduleFireResult { job: ScheduleJob; skipped?: boolean; sessionId?: string; error?: string }
 
+export type ScheduleFireOutcome = "success" | "error" | "skipped";
+export interface ScheduleFireRecord {
+  id: string; jobId: string; firedAt: number; trigger: ScheduleTrigger["type"];
+  target: ScheduleTarget; outcome: ScheduleFireOutcome; error: string | null;
+  sessionId: string | null; runId: string | null; durationMs: number | null;
+}
+
 export interface Schedule {
   list(): ScheduleJob[];
   get(id: string): ScheduleJob | undefined;
@@ -592,6 +599,7 @@ export interface Schedule {
   delete(id: string): void | Promise<void>;
   fire(jobId: string, opts?: { manual?: boolean }): Promise<ScheduleFireResult>;
   runs(jobId: string, opts?: { limit?: number }): ScheduleRun[];
+  history(jobId: string, opts?: { limit?: number; since?: number }): ScheduleFireRecord[];
 }
 ```
 
@@ -1160,17 +1168,18 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
 Jobs are entities, not sessions. A job has an id, title, model, prompt, project, creator, role (never above the creator's), trigger, target (`fresh` work session or one pinned session), timezone, retention and optional notes. Each `fire()` either opens a **fresh** work session in `projectId` with optional `settings.model` and `settings.agent.jobId` (do not set `parentSessionId`; that is for subagents), optionally prepends the final assistant replies from the last N runs for continuity, and posts the prompt through `store.as({ principalId: creator }).messages.create` with `authorPrincipalId` stamped. `valet-agent`'s existing `after("message.create")` starts the run; the scheduler does not change agent.
 
 - **Triggers (v1):** 5-field cron (in the job timezone), interval, one-off (`at`, disable after success), and manual Run now. All go through the same `fire()` path.
-- **Target:** `{ kind: "fresh" }` (default) spawns a new work session with `settings.agent.jobId`. `{ kind: "session", sessionId }` posts into that existing session (message `meta.agent.jobId`) so valet-agent wakes it. Creating or updating a pinned target requires the creator to hold `core:session.write` on it. If the pinned session is later missing or archived, the fire records a **failed** run (with the error on the run row) and leaves enable/disable alone; it never falls back to fresh.
-- **Model:** optional on the job. Fresh sessions use the job model when set. Pinned fires keep the session model unless the job sets one, in which case that model is applied to the session for the fire.
+- **Target:** `{ kind: "fresh" }` (default) spawns a new work session with `settings.agent.jobId`. `{ kind: "session", sessionId }` posts into that existing session (message `meta.agent.jobId`) so valet-agent wakes it. Creating or updating a pinned target requires the creator to hold `core:session.write` on it. If the pinned session is later missing or archived, the fire records a **failed** run (error on the run row), **disables** the job, and does **not** advance `nextRunAt`; the user re-enables after fixing the pin. It never falls back to fresh.
+- **Model:** optional on the job. Fresh sessions use the job model when set. Pinned fires keep the session model unless the job sets one; then the job model is applied for that run only (session.settings.model restored afterward; core has no per-run override).
 - **Continuity:** last-N prior-run finals are for **fresh** targets only (pinned defaults to none).
-- **compactOnRun:** pinned only (default false). When true, `context@1.compact` runs before the prompt. Rejected on fresh targets.
+- **compactOnRun:** pinned only (default false). When true, `context@1.compact` runs before the prompt. Rejected on fresh targets. Compaction failure records a failed run (no notice in the session) and skips the prompt; the job stays enabled.
 - **Manual fire:** always allowed, including when the job or the master switch is disabled; cron/interval/at still respect enable.
 - **Overlap (default):** if the job fires while the target session (pinned) or the previous fresh work session is still running, post a notice into that session saying the job just fired again, leave the run going, and do not queue a second prompt (status `skipped`).
 - **Missed runs:** if Valet was down through due times, catch up **once** on boot, then schedule the next future time. No backlog.
 - **Process:** in-process timer (sleep until `nextRunAt` / short tick); recompute on activate; clear in `onDispose`. No systemd timers.
 - **ACL:** `scheduler:job.read` and `scheduler:job.write`. Anyone with `job.write` may create jobs; the job's role is capped at the creator's role.
 - **Settings v3:** master enable, default timezone (`America/New_York`), default retention (keep last N runs and/or N days).
-- **Provides `schedule@1`.** create/list/get/update/enable/disable/delete, `fire(jobId)`, and run history. Cardinality `one`.
+- **Fire history:** plugin-owned table of every fire (firedAt, trigger kind, target, outcome success/error/skipped, error, sessionId, runId, durationMs). Exposed as `history(jobId, { limit, since })` and `GET /jobs/:id/history`. Retention: last N per job (`historyKeepLast`, default 100).
+- **Provides `schedule@1`.** create/list/get/update/enable/disable/delete, `fire(jobId)`, `runs`, and `history`. Cardinality `one`.
 - **HTTP / agent tool / Jobs UI:** all go through `schedule@1` (routes under `/plugins/valet-scheduler/...`; thin `scheduler` tool). They do not reach into scheduler internals.
 - **UI:** a tucked-away Jobs section (hidden by default). Work sessions with `settings.agent.jobId` stay out of the main session list. Delivery through `platform@1` is reserved for later.
 - **Deferred:** platform delivery, utility-model summaries of prior runs, event triggers. Nightly memory "dreaming" is a later plugin that consumes `schedule@1` (e.g. `scopes.get("schedule").fire(...)`).

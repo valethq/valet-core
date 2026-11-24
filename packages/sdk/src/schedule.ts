@@ -63,6 +63,26 @@ export interface ScheduleRun {
   error: string | null;
 }
 
+/** Which trigger caused this fire (manual always reports `"manual"` even if the job's schedule is cron). */
+export type ScheduleFireTriggerKind = ScheduleTrigger["type"];
+
+export type ScheduleFireOutcome = "success" | "error" | "skipped";
+
+/** Internal fire log for graphing success vs failure over time (plugin-owned, capped retention). */
+export interface ScheduleFireRecord {
+  id: string;
+  jobId: string;
+  firedAt: number;
+  trigger: ScheduleFireTriggerKind;
+  target: ScheduleTarget;
+  outcome: ScheduleFireOutcome;
+  error: string | null;
+  sessionId: string | null;
+  /** Scheduler run row id when one was opened; null for early failures before a run row. */
+  runId: string | null;
+  durationMs: number | null;
+}
+
 export interface ScheduleJobCreate {
   title: string;
   projectId: string;
@@ -121,6 +141,8 @@ export interface Schedule {
   disable(id: string): ScheduleJob | Promise<ScheduleJob>;
   delete(id: string): void | Promise<void>;
   fire(jobId: string, opts?: { manual?: boolean }): Promise<ScheduleFireResult>;
-  /** Run history for a job, newest first. */
+  /** Work-session run rows for a job, newest first. */
   runs(jobId: string, opts?: { limit?: number }): ScheduleRun[];
+  /** Fire log (success/error/skipped) for graphing, newest first. */
+  history(jobId: string, opts?: { limit?: number; since?: number }): ScheduleFireRecord[];
 }
