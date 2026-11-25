@@ -1,4 +1,5 @@
 export * from "./acl";
+export * from "./agent";
 export * from "./catalog";
 export * from "./context";
 export * from "./control";
