@@ -9,6 +9,7 @@ import {
   type Denial,
   type Logger,
   type Message,
+  type MessageDelivery,
   type Part,
   type PartData,
   type PartTypes,
@@ -36,6 +37,12 @@ type EvName = Extract<keyof ValetEvents, string>;
 
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["complete", "cancelled", "error", "interrupted"]);
 const PART_CHECKPOINT_MS = 500;
+
+function checkDelivery(value: unknown): asserts value is MessageDelivery | undefined {
+  if (value !== undefined && value !== "queue" && value !== "interrupt") {
+    throw new Error('delivery must be "queue" or "interrupt"');
+  }
+}
 
 /** Use the provisional seq when it is still free; otherwise take the next one inside the write. */
 function claimSeq(db: Database, sessionId: string, reserved: number): number {
@@ -514,11 +521,16 @@ export class StoreView implements Store {
       runId?: string;
       origin?: Message["origin"];
       status?: Message["status"];
+      delivery?: MessageDelivery;
       meta?: Record<string, unknown>;
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult> => {
       for (const data of m.parts) this.#deps.partTypes.check(data, this.#caller.plugin);
       if (m.runId !== undefined) this.#assertRun(m.sessionId, m.runId);
+      checkDelivery(m.delivery);
+      checkDelivery(m.meta?.delivery);
+      const meta = { ...(m.meta ?? {}) };
+      if (m.delivery !== undefined) meta.delivery = m.delivery;
       const now = Date.now();
       const seqRow = this.#deps.db
         .query<{ seq: number }, string>(
@@ -534,7 +546,7 @@ export class StoreView implements Store {
         runId: m.runId ?? null,
         status: m.status ?? "complete",
         origin: m.origin ?? null,
-        meta: m.meta ?? {},
+        meta,
         createdAt: now,
         updatedAt: now,
       };
@@ -553,6 +565,7 @@ export class StoreView implements Store {
         this.#deps.db.transaction(() => {
           const drafted = payload.message;
           if (drafted.runId !== null) this.#assertRun(drafted.sessionId, drafted.runId);
+          checkDelivery(drafted.meta.delivery);
           const seqNow = claimSeq(this.#deps.db, drafted.sessionId, drafted.seq);
           const msg = seqNow === drafted.seq ? drafted : { ...drafted, seq: seqNow };
           // spec-gap: dev mode freezes the action payload, so after hooks keep the pre-commit seq if it had to change.
