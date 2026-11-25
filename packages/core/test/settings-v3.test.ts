@@ -110,6 +110,13 @@ describe("document checks", () => {
     expect(c.settings.get("headers")?.node.input.type).toBe("map");
   });
 
+  test("list styles are validated; model-catalog is allowed", () => {
+    const styleDoc = (style: unknown) =>
+      doc([{ id: "models", label: "M", input: { type: "list", style, item: { type: "string" } } }]);
+    for (const style of ["rows", "table", "model-catalog"]) expect(docErrors(styleDoc(style))).toBe("");
+    expect(docErrors(styleDoc("cards"))).toContain('style must be "rows", "table" or "model-catalog"');
+  });
+
   test("malformed documents list every problem", () => {
     const msg = docErrors(
       doc([
