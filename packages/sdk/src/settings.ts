@@ -75,6 +75,10 @@ export interface InputBase {
 
 export type Resolver = "secret" | "file" | "env" | "cmd";
 
+// spec-gap: 12.1 lists only "rows" and "table" as list styles.
+/** Rendering styles for a list input. */
+export type ListInputStyle = "rows" | "table" | "model-catalog";
+
 /** An input: a catalog type or a "local:" recipe, with the fields its type understands. */
 export type Input = InputBase & Record<string, unknown>;
 
