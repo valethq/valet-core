@@ -65,7 +65,7 @@ graph TD
   ui["valet-ui (own port)"] -. REST/WS client .-> http
   auth[valet-auth: identity@1] --> http
   discord[valet-discord: platform@1] --> agent
-  sched[valet-scheduler] --> agent
+  sched[valet-scheduler: schedule@1] --> agent
   skills[valet-skills] --> ctxm
 ```
 
@@ -80,7 +80,7 @@ graph TD
 | Config and secrets loading | Platforms (`valet-discord`), schedules (`valet-scheduler`), skills (`valet-skills`) |
 | Scope registry (provide/consume and cardinality) | Defining new scopes beyond the core set |
 
-Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`, `context@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is implemented and registered (`defineScope`) by `valet-contextmanager`; core only ships its types. Any plugin can define a scope of its own the same way.
+Core defines the core scopes' **interfaces** in the SDK (`inference@1`, `tools@1`, `platform@1`, `identity@1`, `context@1`, `schedule@1`, and others such as `transport@1` and `policy@1`) because several unrelated plugins must agree on them. It never **implements** them. `context@1` is implemented and registered (`defineScope`) by `valet-contextmanager`; core only ships its types. Any plugin can define a scope of its own the same way.
 
 ## 4. Repo layout and packages
 
@@ -247,6 +247,7 @@ export interface ValetScopes {
   platform: MessagePlatform;
   identity: IdentityProvider;
   context: ContextManager;   // provided by valet-contextmanager
+  schedule: Schedule;        // schedule@1, provided by valet-scheduler
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 
@@ -504,7 +505,7 @@ export interface MessagePlatform {
 }
 ```
 
-Inbound messages need no scope method. A platform plugin resolves the sender with `store.principals.resolveIdentity(...)`. It finds or creates the session bound to `(platform, conversationId)` and calls `store.messages.create(...)` with an `origin`. Outbound delivery is a hook: the platform plugin listens for `after:message.complete` on sessions bound to its platform. The `platform@1` scope exists so other plugins (the scheduler, the agent's `send_message` tool) can deliver to a binding without knowing which plugin owns it.
+Inbound messages need no scope method. A platform plugin resolves the sender with `store.principals.resolveIdentity(...)`. It finds or creates the session bound to `(platform, conversationId)` and calls `store.messages.create(...)` with an `origin`. Outbound delivery is a hook: the platform plugin listens for `after:message.complete` on sessions bound to its platform. The `platform@1` scope exists so other plugins (a future scheduler delivery target, the agent's `send_message` tool) can deliver to a binding without knowing which plugin owns it.
 
 ### 6.4 `context@1` (provided by `valet-contextmanager`)
 
@@ -528,6 +529,77 @@ export interface ContextManager {
   shouldCompact(req: { sessionId: string; model: ModelInfo; lastUsage: { inputTokens?: number; contextTokens?: number } }): Promise<boolean>;
   /** Writes a compaction part: a valet summary (`by: "valet"`), or a marker for a harness that compacted itself. Older messages stay stored but leave the prompt window. */
   compact(req: { sessionId: string; reason: "auto" | "manual" | "resume" }): Promise<{ summaryPartId: string }>;
+}
+```
+
+### 6.5 `schedule@1`: scheduled jobs (provided by `valet-scheduler`)
+
+Jobs are entities, not sessions. The types live in the SDK (`schedule.ts`). Cardinality is `one`. HTTP, the agent tool, the Jobs UI and later consumers (for example a memory "dreaming" plugin) go through this scope rather than scheduler internals.
+
+```ts
+export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted";
+
+export type ScheduleTrigger =
+  | { type: "cron"; expr: string }
+  | { type: "interval"; everyMs: number }
+  | { type: "at"; at: number }
+  | { type: "manual" };
+
+export type ScheduleTarget =
+  | { kind: "fresh" }
+  | { kind: "session"; sessionId: string };
+
+export interface ScheduleRetention { keepLast?: number; keepDays?: number }
+
+export interface ScheduleJob {
+  id: string; title: string; enabled: boolean; projectId: string;
+  model: ModelRef | null; prompt: string; creatorPrincipalId: string; role: Role;
+  trigger: ScheduleTrigger; target: ScheduleTarget; timezone: string; retention: ScheduleRetention;
+  notes: string | null; compactOnRun: boolean;
+  lastRunAt: number | null; lastStatus: Exclude<ScheduleJobStatus, "running"> | null;
+  lastSessionId: string | null; nextRunAt: number | null;
+  createdAt: number; updatedAt: number;
+  schedule?: string; // plain-language schedule for UIs
+}
+
+export interface ScheduleRun {
+  id: string; jobId: string; sessionId: string | null; status: ScheduleJobStatus;
+  startedAt: number; endedAt: number | null; error: string | null;
+}
+
+export interface ScheduleJobCreate {
+  title: string; projectId: string; model?: ModelRef | null; prompt: string; trigger: ScheduleTrigger;
+  target?: ScheduleTarget; // default { kind: "fresh" }
+  compactOnRun?: boolean; // pinned only; default false; rejected on fresh
+  timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role; enabled?: boolean;
+  creatorPrincipalId: string; // job role is capped at this principal's role
+}
+
+export interface ScheduleJobUpdate {
+  title?: string; enabled?: boolean; projectId?: string; model?: ModelRef | null; prompt?: string;
+  trigger?: ScheduleTrigger; target?: ScheduleTarget; compactOnRun?: boolean; timezone?: string; retention?: ScheduleRetention; notes?: string | null; role?: Role;
+}
+
+export interface ScheduleFireResult { job: ScheduleJob; skipped?: boolean; sessionId?: string; error?: string }
+
+export type ScheduleFireOutcome = "running" | "success" | "error" | "skipped";
+export interface ScheduleFireRecord {
+  id: string; jobId: string; firedAt: number; trigger: ScheduleTrigger["type"];
+  target: ScheduleTarget; outcome: ScheduleFireOutcome; error: string | null;
+  sessionId: string | null; runId: string | null; durationMs: number | null;
+}
+
+export interface Schedule {
+  list(): ScheduleJob[];
+  get(id: string): ScheduleJob | undefined;
+  create(input: ScheduleJobCreate): ScheduleJob | Promise<ScheduleJob>;
+  update(id: string, patch: ScheduleJobUpdate): ScheduleJob | Promise<ScheduleJob>;
+  enable(id: string): ScheduleJob | Promise<ScheduleJob>;
+  disable(id: string): ScheduleJob | Promise<ScheduleJob>;
+  delete(id: string): void | Promise<void>;
+  fire(jobId: string, opts?: { manual?: boolean }): Promise<ScheduleFireResult>;
+  runs(jobId: string, opts?: { limit?: number }): ScheduleRun[];
+  history(jobId: string, opts?: { limit?: number; since?: number }): ScheduleFireRecord[];
 }
 ```
 
@@ -1018,7 +1090,7 @@ export interface DirListing {
 | 5. Compaction and resume | `valet-contextmanager` (compaction), `valet-agent` (resume policy) | `compaction` parts, `run.interrupted`, FTS |
 | 6. Discord with owner/friend tiers | `valet-discord` | `platform@1`, principals and identities, effective role, `tool.call` policy |
 | Skills (rank 8) | `valet-skills` | Lists `skills/*/SKILL.md` in the preamble, `skill_read` tool |
-| Nightly memory "dreaming", scheduled prompts (rank 9) | `valet-scheduler` (v1.1) | Creates messages in a target session, delivers through `platform@1` |
+| Scheduled jobs and nightly memory "dreaming" (rank 9) | `valet-scheduler` (v1); dreaming as a later consumer | `schedule@1`, job entities; each fire() spawns a fresh work session |
 
 ### 11.1 `valet-agent`
 
@@ -1090,6 +1162,27 @@ These are the two tools Helper already uses most (17.4k `exec` events and 2.9k `
 - **Provides `identity@1`.** On first boot it logs a one-time setup URL that sets the owner password (argon2id via `Bun.password`). Logins issue HTTP-only, `SameSite=Strict` cookies per device. UI and API share a hostname on different ports, so they are same-site. Bearer tokens serve API clients (CLI, scripts). Devices and tokens live in its own `p_auth_*` tables and are listed and revoked at `/plugins/valet-auth/devices`.
 - **Default control-plane policy**, as before hooks on `control.request`: `owner` gets everything. `trusted` and `guest` principals get nothing on the control plane in v1, since friends use Discord (decision 5).
 - **Public-API only,** like every base plugin. Anything it can do, a replacement auth plugin can do.
+
+### 11.8 `valet-scheduler`
+
+Jobs are entities, not sessions. A job has an id, title, model, prompt, project, creator, role (never above the creator's), trigger, target (`fresh` work session or one pinned session), timezone, retention and optional notes. Each `fire()` either opens a **fresh** work session in `projectId` with optional `settings.model` and `settings.agent.jobId` (do not set `parentSessionId`; that is for subagents), optionally prepends the final assistant replies from the last N runs for continuity, and posts the prompt through `store.as({ principalId: creator }).messages.create` with `authorPrincipalId` stamped. `valet-agent`'s existing `after("message.create")` starts the run; the scheduler does not change agent.
+
+- **Triggers (v1):** 5-field cron (in the job timezone), interval, one-off (`at`, disable after success), and manual Run now. All go through the same `fire()` path.
+- **Target:** `{ kind: "fresh" }` (default) spawns a new work session with `settings.agent.jobId`. `{ kind: "session", sessionId }` posts into that existing session (message `meta.agent.jobId`) so valet-agent wakes it. Creating or updating a pinned target requires the creator to hold `core:session.write` on it (exists + not archived). The session id is the identity — no same-project check; a session that moved projects still receives the fire. If the pinned session is later missing or archived, the fire records a **failed** run (error on the run row), **disables** the job, and does **not** advance `nextRunAt`; the user re-enables after fixing the pin. It never falls back to fresh.
+- **Model:** optional on the job. Fresh sessions use the job model when set. Pinned fires keep the session model unless the job sets one; then the job model is applied for that run only (`session.settings.model` restored on `run.end`). TODO(core): a real per-run model override so pinned chats need not be patched.
+- **Continuity:** last-N prior-run finals are for **fresh** targets only (pinned defaults to none).
+- **compactOnRun:** pinned only (default false). When true, `context@1.compact` runs before the prompt. Rejected on fresh targets. Compaction failure records a failed run (no notice in the session) and skips the prompt; the job stays enabled.
+- **Manual fire:** always allowed, including when the job or the master switch is disabled; cron/interval/at still respect enable.
+- **Overlap (default):** if the job fires while the target session (pinned) or the previous fresh work session is still running, post a notice into that session saying the job just fired again, leave the run going, and do not queue a second prompt (status `skipped`).
+- **Missed runs:** if Valet was down through due times, catch up **once** on boot, then schedule the next future time. No backlog.
+- **Process:** in-process timer (sleep until `nextRunAt` / short tick); recompute on activate; clear in `onDispose`. No systemd timers.
+- **ACL:** `scheduler:job.read` and `scheduler:job.write`. Anyone with `job.write` may create jobs; the job's role is capped at the creator's role.
+- **Settings v3:** master enable, default timezone (`America/New_York`), default retention (keep last N runs and/or N days).
+- **Fire history:** plugin-owned table of every fire (firedAt, trigger kind, target, outcome running/success/error/skipped, error, sessionId, runId, durationMs). A `running` row is written at fire time and updated at run end with outcome + durationMs. On boot, leftover `running` rows are marked error/abandoned. Exposed as `history(jobId, { limit, since })` and `GET /jobs/:id/history`. Retention: last N per job (`historyKeepLast`, default 100).
+- **Provides `schedule@1`.** create/list/get/update/enable/disable/delete, `fire(jobId)`, `runs`, and `history`. Cardinality `one`.
+- **HTTP / agent tool / Jobs UI:** all go through `schedule@1` (routes under `/plugins/valet-scheduler/...`; thin `scheduler` tool). They do not reach into scheduler internals.
+- **UI:** a tucked-away Jobs section (hidden by default). Work sessions with `settings.agent.jobId` stay out of the main session list. Delivery through `platform@1` is reserved for later.
+- **Deferred:** platform delivery, utility-model summaries of prior runs, event triggers. Nightly memory "dreaming" is a later plugin that consumes `schedule@1` (e.g. `scopes.get("schedule").fire(...)`).
 
 ## 12. Boot, config and settings
 
@@ -1667,7 +1760,7 @@ value.
 | **M2 exec** | `valet-exec`, `valet-fs` | A 30-minute command survives `systemctl --user restart valet` and the session shows completion. |
 | **M3 continuity** | compaction, interrupted-run resume, session search | Killing valet mid-turn resumes once after restart. |
 | **M4 discord** | `valet-discord`, tiers | Friend can chat in a guild channel without exec or memory. Owner's DMs have full access. |
-| **v1.1** | `valet-scheduler` (nightly memory promotion), `valet-skills`, `valet-openai` | |
+| **v1.1** | `valet-scheduler` (job runner; dreaming later), `valet-skills`, `valet-openai` | |
 
 ## 14. Decisions
 
@@ -1679,7 +1772,7 @@ Owner reviewed draft 1 on 2026-11-12. He added two rules (plugin identity with d
 4. **Repo layout:** each base plugin is its own folder and git repo from M1 (`valethq/valet-<name>`, Owner's one-repo-per-project rule), developed beside `valet-core` and linked to `@valethq/sdk` with `bun link`. `pluginPaths` points at the folder that holds them.
 5. **Friend tier:** trusted gets chat, web search and fetch, with no exec, no fs and no control plane. Guests get chat only, in mentioned channels. `MEMORY.md` and the daily memory files load only in owner-only contexts. `USER.md` loads everywhere so its privacy rules apply. Each plugin enforces its part by denying.
 6. **Host and exposure:** valet runs on host as a user systemd service, reached only through **Tailscale Serve**: `https://host.<tailnet>.ts.net/` maps to the UI (7418) and port 8443 on the same host maps to the control plane (7417). Login goes through `valet-auth`. Use Funnel only if a device can't join the tailnet.
-7. **Plugin names:** `valet-agent`, `valet-auth`, `valet-contextmanager`, `valet-ui`, `valet-devin`, `valet-exec`, `valet-fs`, `valet-discord`, `valet-skills`, `valet-scheduler`.
+7. **Plugin names and scheduler jobs:** `valet-agent`, `valet-auth`, `valet-contextmanager`, `valet-ui`, `valet-devin`, `valet-exec`, `valet-fs`, `valet-discord`, `valet-skills`, `valet-scheduler`. Scheduler jobs are entities, not sessions: each has an id, title, model, trigger and role (capped at the creator's). Each `fire()` delivers to a fresh work session or a pinned session (`settings.agent.jobId` / message meta; not `parentSessionId`) and posts the prompt as the creator. Manual fire always runs; enable gates timed triggers only. Overlap interrupts the running work session with a notice and skips a second run; missed due times catch up once on boot. Delivery targets and utility-model continuity summaries are deferred. Memory "dreaming" is a later consumer of `fire()`, not a fixed-session message pump.
 
 Calls made in draft 2 that Owner can overrule:
 

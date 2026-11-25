@@ -12,6 +12,7 @@ export * from "./manifest";
 export * from "./platform";
 export * from "./plugin";
 export * from "./policy";
+export * from "./schedule";
 export * from "./scopes";
 export * from "./settings";
 export * from "./store";

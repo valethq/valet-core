@@ -249,4 +249,5 @@ export const CORE_SCOPE_DEFS: ScopeDefinition[] = [
   { name: "identity", version: 1, cardinality: "many" },
   { name: "policy", version: 1, cardinality: "one" },
   { name: "transport", version: 1, cardinality: "many" },
+  { name: "schedule", version: 1, cardinality: "one" },
 ];
