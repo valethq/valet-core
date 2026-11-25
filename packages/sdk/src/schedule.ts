@@ -2,13 +2,7 @@ import type { ModelRef } from "./inference";
 import type { Role } from "./tools";
 
 /** Terminal statuses plus in-flight `running` for run-history rows. A job's `lastStatus` never stores `running`. */
-export type ScheduleJobStatus =
-  | "running"
-  | "ok"
-  | "failed"
-  | "timed_out"
-  | "skipped"
-  | "interrupted";
+export type ScheduleJobStatus = "running" | "ok" | "failed" | "timed_out" | "skipped" | "interrupted";
 
 export type ScheduleTrigger =
   | { type: "cron"; expr: string }
@@ -17,9 +11,7 @@ export type ScheduleTrigger =
   | { type: "manual" };
 
 /** Where each fire() delivers the prompt. Default is a fresh work session. */
-export type ScheduleTarget =
-  | { kind: "fresh" }
-  | { kind: "session"; sessionId: string };
+export type ScheduleTarget = { kind: "fresh" } | { kind: "session"; sessionId: string };
 
 export interface ScheduleRetention {
   keepLast?: number;
