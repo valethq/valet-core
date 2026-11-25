@@ -5,6 +5,7 @@ const ID = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const RESERVED = new Set(["enabled", "constructor", "__proto__", "prototype", "hasOwnProperty"]);
 const SECTIONS = new Set(["system", "inference", "tools"]);
 const RESOLVERS = new Set<Resolver>(["secret", "file", "env", "cmd"]);
+const LIST_STYLES = new Set(["rows", "table", "model-catalog"]);
 export const DISPLAY_TYPES = new Set([
   "heading",
   "note",
@@ -142,6 +143,9 @@ export function compileDoc(doc: unknown): CompiledDoc {
         node.inputs = children(f.inputs, `${at}.inputs`);
         break;
       case "list": {
+        if (f.style !== undefined && (typeof f.style !== "string" || !LIST_STYLES.has(f.style))) {
+          err(at, 'style must be "rows", "table" or "model-catalog"');
+        }
         const item = compileInput(f.item, `${at}.item`);
         if (item) node.item = item;
         break;
