@@ -1,4 +1,3 @@
-import type { AgentRuntime } from "./agent";
 import type { ContextManager } from "./context";
 import type { Caller } from "./events";
 import type { IdentityProvider } from "./identity";
@@ -21,7 +20,6 @@ export interface ValetScopes {
   policy: PolicyProvider; // cardinality one, provided by valet-policy
   transport: Transport;
   schedule: Schedule; // schedule@1, cardinality one, provided by valet-scheduler
-  agent: AgentRuntime; // agent@1, cardinality one
 }
 export type ScopeName = Extract<keyof ValetScopes, string>;
 

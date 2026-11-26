@@ -1,5 +1,4 @@
 import type { Audience } from "./acl";
-import type { MessageDelivery } from "./agent";
 import type { Caller, Denial } from "./events";
 import type { ModelRef } from "./inference";
 import type { PartTypes } from "./parttypes";
@@ -172,8 +171,6 @@ export interface Store {
       runId?: string;
       origin?: Message["origin"];
       status?: Message["status"];
-      /** Per-message delivery mode, stored as `meta.delivery`. */
-      delivery?: MessageDelivery;
       meta?: Record<string, unknown>;
       parts: PartData[];
     }): Promise<{ message: Message; parts: Part[] } | CancelledResult>;
