@@ -2,7 +2,6 @@ import { basename } from "node:path";
 import {
   type Caller,
   type CancelledResult,
-  type MessageDelivery,
   type Principal,
   type RequestContext,
   type ResourceScope,
@@ -168,11 +167,6 @@ function parseFiniteQuery(v: string | null, name: string): QueryNum {
   const n = Number(v);
   if (!Number.isFinite(n)) return errorJson(400, "bad_request", `${name} must be a finite number`);
   return n;
-}
-
-function parseDelivery(v: unknown): MessageDelivery | undefined | Response {
-  if (v === undefined || v === "queue" || v === "interrupt") return v;
-  return errorJson(400, "bad_request", 'delivery must be "queue" or "interrupt"');
 }
 
 export interface RestDeps {
@@ -362,8 +356,6 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
       if (clientId !== undefined && (typeof clientId !== "string" || clientId.length > 100)) {
         return errorJson(400, "bad_request", "clientMessageId must be a string of at most 100 chars");
       }
-      const delivery = parseDelivery(b.delivery);
-      if (delivery instanceof Response) return delivery;
       if (clientId !== undefined) {
         const recent = store.messages.list(ctx.params.id as string, { limit: 50 });
         const dup = recent.find((m) => m.message.meta.clientMessageId === clientId);
@@ -385,7 +377,6 @@ export function restRoutes(deps: RestDeps): RestRoute[] {
         await store.messages.create({
           sessionId: ctx.params.id as string,
           ...(clientId === undefined ? {} : { meta: { clientMessageId: clientId } }),
-          ...(delivery === undefined ? {} : { delivery }),
           role: b.role as "user" | "assistant" | "system" | "tool",
           parts: b.parts as Parameters<Store["messages"]["create"]>[0]["parts"],
           ...(ctx.caller.actor === undefined ? {} : { authorPrincipalId: ctx.caller.actor.principalId }),

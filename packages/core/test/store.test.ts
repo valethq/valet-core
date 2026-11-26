@@ -196,28 +196,6 @@ describe("messages", () => {
     expect(seen.callers[0]?.actor).toEqual({ principalId: principal.id, role: "guest" });
   });
 
-  test("message.create stores a delivery mode in meta and rejects an unknown one", async () => {
-    const project = await makeProject();
-    const session = await makeSession(project.id);
-    const created = await view.messages.create({
-      sessionId: session.id,
-      role: "user",
-      delivery: "interrupt",
-      meta: { clientMessageId: "cm_1" },
-      parts: [],
-    });
-    if (isCancelled(created)) throw new Error("cancelled");
-    expect(created.message.meta).toEqual({ clientMessageId: "cm_1", delivery: "interrupt" });
-    await expect(
-      view.messages.create({
-        sessionId: session.id,
-        role: "user",
-        delivery: "later" as "queue",
-        parts: [],
-      }),
-    ).rejects.toThrow('delivery must be "queue" or "interrupt"');
-  });
-
   test("openPart streams deltas as signals and checkpoints the row", async () => {
     const project = await makeProject();
     const session = await makeSession(project.id);
